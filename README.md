@@ -19,6 +19,8 @@ Cualquier otra ruta responde 404, y el panel solo admite CORS desde los orígene
 
 Lo que no se puede hacer desde el repositorio está marcado con **(tú)**.
 
+**Requisito: plan Workers Paid.** Publicar una versión calcula el SHA-512 de todo el paquete dentro de la solicitud, y el inicio de sesión del panel usa PBKDF2. Los dos pasan de los 10 ms de CPU por solicitud del plan Free. Las pruebas locales no lo detectan porque Miniflare no limita la CPU.
+
 1. **(tú) Genera los secretos, una sola vez**, en un equipo de confianza:
 
    ```bash
@@ -40,7 +42,7 @@ Lo que no se puede hacer desde el repositorio está marcado con **(tú)**.
    - `ROOT_PRIVATE_KEY`: el contenido de `secrets/root-private.txt`.
    - `ADMIN_SETUP_CODE`: el contenido de `secrets/admin-setup-code.txt`.
 
-   Pulsa Deploy. Sin `ROOT_PRIVATE_KEY`, las rutas que firman responden `503 server_misconfigured`.
+   Pulsa Deploy. Sin `ROOT_PRIVATE_KEY`, los retos y todo lo que firma responden `503 server_misconfigured`.
 
 4. **(tú) Si el panel corre en un navegador o en Tauri**, define la variable `ADMIN_ORIGINS` con sus orígenes separados por comas (por ejemplo `https://admin.ejemplo.com,http://tauri.localhost`). Si el panel llama desde código nativo, déjala vacía. Ojo: el valor de `wrangler.jsonc` reemplaza al del panel en cada despliegue desde Git, así que cámbialo en el archivo.
 
@@ -78,7 +80,9 @@ Las pruebas corren dentro del runtime de Workers con `@cloudflare/vitest-plugin`
 
 - **El plazo empieza al activar**, también en mensual y anual. El panel puede fijar `expiresAt` antes de activar si el cobro empezó otro día.
 - **Huella sin TPM:** basta con que coincidan dos de tres partes (placa, disco, MAC), para que cambiar una pieza no bloquee la sucursal. Con dos cambios, el proveedor libera el equipo desde el panel.
-- **TPM sin atestación:** el Worker registra la llave pública que la sucursal declara como del TPM, pero no verifica el certificado de respaldo (EK) del fabricante.
+- **TPM sin atestación:** el Worker registra la llave pública que la sucursal declara como del TPM (exige que sea P-256), pero no verifica el certificado de respaldo (EK) del fabricante.
+- **La huella de hardware solo se revisa al renovar.** Las demás rutas de la sucursal confían en la firma de la llave. Una llave copiada a otro equipo deja de renovar, y a los 3 días la licencia se bloquea sola.
+- **El registro mTLS no prueba la posesión del certificado.** Una sucursal con licencia podría registrar primero la huella del certificado de otra; la verdadera recibiría `409`. El proveedor lo ve en `GET /admin/v1/registry` y lo corrige liberando el equipo.
 - **La misma raíz firma los paquetes.** Es lo pedido (una sola llave, en el Worker). Si alguien tomara el control del Worker podría firmar un paquete; una llave de publicación aparte, fuera de línea, cerraría ese hueco.
 - **Revocar es definitivo.** Para volver a dar servicio se crea otra licencia.
-- **PBKDF2 a 100 000 iteraciones**, para no pasar del límite de CPU de Workers; lo compensan la llave del dispositivo y el TOTP. En el plan Free (10 ms de CPU por solicitud) cada inicio de sesión del panel gasta casi todo ese margen; si Cloudflare corta el login, pasa el Worker a Workers Paid.
+- **PBKDF2 a 100 000 iteraciones**, para mantener corto el inicio de sesión; lo compensan la llave del dispositivo y el TOTP.

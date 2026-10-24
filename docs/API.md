@@ -39,9 +39,10 @@ Cualquier otra ruta responde `404`. Todas las respuestas llevan `Cache-Control: 
 | 404 | `not_found` | Ruta o registro inexistente. |
 | 409 | `conflict` | Estado incompatible (siteId repetido, versión repetida, licencia revocada, etc.). |
 | 413 | `too_large` | Cuerpo mayor al límite. |
-| 429 | `rate_limited` | Demasiados retos pendientes, tickets abiertos o cuenta del panel bloqueada. |
+| 416 | `range_not_satisfiable` | Cabecera `Range` inválida o con varios rangos en una descarga. |
+| 429 | `rate_limited` | Demasiados tickets abiertos o cuenta del panel bloqueada. |
 | 500 | `internal` | Error no previsto. |
-| 503 | `server_misconfigured` | Falta un secreto del Worker (`ROOT_PRIVATE_KEY`). |
+| 503 | `server_misconfigured` | Falta o es inválido el secreto `ROOT_PRIVATE_KEY` (también lo usan los retos). |
 
 ## 2. Solicitudes firmadas con reto
 
@@ -52,12 +53,11 @@ Las usan la sucursal (después de activar) y el panel para confirmar el alta e i
 `POST /branch/v1/challenges` con `{ "licenseId": "<uuid>" }`, o `POST /admin/v1/challenges` con `{ "username": "<usuario>" }`.
 
 ```json
-{ "nonce": "p0Xh3...base64url de 32 bytes", "expiresAt": "2026-10-24T15:06:05.123Z" }
+{ "nonce": "AAABmhQ3...base64url de 56 bytes", "expiresAt": "2026-10-24T15:06:05.123Z" }
 ```
 
-- Vale **2 minutos** y **una sola vez**: se consume en cuanto el Worker lo recibe, aunque la firma falle. Pide uno nuevo por cada solicitud firmada.
-- Máximo 10 retos pendientes por licencia o usuario (`429`).
-- Para una licencia o un usuario inexistente la respuesta tiene el mismo aspecto, pero ese reto nunca será aceptado.
+- Vale **2 minutos**, **una sola vez**, y solo para el `scope` y el `subject` con que se pidió. Se consume en cuanto el Worker lo recibe, aunque la firma falle. Pide uno nuevo por cada solicitud firmada.
+- Trátalo como texto opaco. Pedir retos no guarda nada en el servidor, así que pedir muchos no bloquea a nadie, y la respuesta es igual exista o no la licencia o el usuario.
 
 ### 2.2 Firmar
 
@@ -138,7 +138,7 @@ En la renovación deben coincidir **al menos dos de las tres**, así que cambiar
 
 La primera vez, con el código que entrega el panel. La sucursal genera su llave de licencia:
 
-- **Con TPM 2.0:** llave ECC P-256 no exportable dentro del TPM (`alg: "ES256"`, `binding.kind: "tpm"`).
+- **Con TPM 2.0:** llave ECC P-256 no exportable dentro del TPM (`alg: "ES256"`, `binding.kind: "tpm"`). `tpm` con `Ed25519` da `400`.
 - **Sin TPM:** llave Ed25519 (o P-256) guardada cifrada en el almacén (`binding.kind: "fingerprint"`).
 
 1. `POST /branch/v1/challenges` → `nonce`.
@@ -160,7 +160,7 @@ El código no distingue mayúsculas, guiones ni espacios. Respuesta `200`:
 { "license": "<JWS culinary-license+jws>" }
 ```
 
-El código sirve una sola vez. El plazo de la prueba, mensual o anual empieza en este momento, salvo que el panel haya fijado `expiresAt` antes.
+El código sirve una sola vez. El plazo de la prueba, mensual o anual empieza en este momento, salvo que el panel haya fijado `expiresAt` antes. Si la activación se rechaza (licencia vencida, `503`), el código no se gasta y la llave no queda ligada.
 
 ### 4.3 Licencia de uso
 
@@ -223,18 +223,22 @@ Una licencia vencida o revocada no se renueva: `403` con `code` `license_expired
 {
   "v": 1,
   "licenseId": "0b6c5c1e-3f0a-4d39-9f5e-1d2a8f3c7b10",
+  "revision": 5,
   "siteId": "plaza-centro",
   "status": "expired",
   "plan": "monthly",
   "expiresAt": "2026-11-24T15:04:05.123Z",
   "revokedAt": null,
+  "challenge": "<el nonce de la solicitud que recibió este aviso>",
   "iat": "2026-11-25T08:00:00.000Z"
 }
 ```
 
-Al recibir un aviso válido la sucursal se bloquea de inmediato, sin esperar a que acabe la gracia. Un `403` sin `notice` válido no bloquea por sí solo: puede venir de un intermediario.
+La sucursal se bloquea de inmediato, sin esperar a que acabe la gracia, solo si el aviso está firmado por la raíz, trae su `licenseId` y su `siteId`, su `challenge` es el nonce que ella misma envió en esa solicitud y su `revision` no es menor que la guardada. Así un aviso viejo no se puede reenviar después de una renovación. Un `403` sin `notice` válido no bloquea por sí solo: puede venir de un intermediario.
 
-Otros errores: `401` (firma o reto), `403 binding_mismatch`.
+Todas las rutas firmadas de la sucursal que rechazan una licencia vencida o revocada (renovación, actualizaciones, soporte, registro) responden con el mismo `notice`.
+
+Otros errores: `401` (firma o reto), `403 binding_mismatch`, `409 conflict` si la licencia cambió durante la renovación (reintenta con un reto nuevo).
 
 ### 4.5 Actualizaciones
 
@@ -279,7 +283,7 @@ Payload de `culinary-update+jws`:
 
 El payload de `culinary-release+jws` lleva `v`, `releaseId`, `version`, `platform`, `filename`, `bytes`, `sha512` e `iat`.
 
-**Descargar**: `GET <download.path>` con `Authorization: Bearer <download.token>`. No lleva firma de reto, así que se puede reanudar con `Range: bytes=<inicio>-<fin>` (`206` con `Content-Range`) durante la hora que vale el permiso.
+**Descargar**: `GET <download.path>` con `Authorization: Bearer <download.token>`. No lleva firma de reto, así que se puede reanudar con `Range: bytes=<inicio>-<fin>` (`206` con `Content-Range`; un rango inválido da `416`) durante la hora que vale el permiso.
 
 Antes de instalar, la sucursal comprueba:
 
@@ -365,6 +369,7 @@ El panel muestra `uri` como código QR una sola vez. TOTP: RFC 6238, SHA-1, 6 d�
 - Tres factores: llave del dispositivo, contraseña y TOTP. Cualquier fallo responde `401` con el mismo mensaje.
 - Cinco fallos con firma válida bloquean la cuenta 15 minutos (`429`).
 - La sesión dura 8 horas. Las demás rutas piden `Authorization: Bearer <token>`.
+- `POST /admin/v1/invites` y `DELETE /admin/v1/admins/{id}` piden además la firma del dispositivo (sección 2, scope `admin`, subject = el `username` de la sesión). Así un token robado no basta para crear ni borrar cuentas.
 
 | Método y ruta | Respuesta |
 |---|---|
@@ -420,9 +425,9 @@ Licencia en el panel:
 
 | Método y ruta | Cuerpo | Efecto |
 |---|---|---|
-| `GET /admin/v1/licenses?tenantId=&status=` | | `{ "licenses": [Licencia] }` |
+| `GET /admin/v1/licenses?tenantId=&status=` | | `{ "licenses": [Licencia] }`; `status` fuera de `pending`, `active`, `expired`, `revoked` da `400` |
 | `GET /admin/v1/licenses/{id}` | | `{ "license": Licencia }` |
-| `PATCH /admin/v1/licenses/{id}` | cualquiera de `customer`, `branchName`, `plan`, `trialDays`, `features`, `limits`, `expiresAt` | Editar, habilitar o quitar funciones. Cambiar `plan` en una licencia activada reinicia el plazo desde ahora; `expiresAt` (futuro) lo fija a mano. |
+| `PATCH /admin/v1/licenses/{id}` | cualquiera de `customer`, `branchName`, `plan`, `trialDays`, `features`, `limits`, `expiresAt` | Editar, habilitar o quitar funciones. Solo `plan` y `expiresAt` mueven el vencimiento: cambiar `plan` en una licencia activada reinicia el plazo desde ahora, y `expiresAt` (futuro) lo fija a mano y gana. `trialDays` solo vale con el plan de prueba (`400` si no) y cambiarlo no mueve un plazo ya corriendo. |
 | `POST /admin/v1/licenses/{id}/renew` | `{}` o `{ "until": "<ISO futuro>" }` | Sin `until`, suma un periodo (mes, año o `trialDays`) al vencimiento vigente o a ahora, lo que sea posterior. `409` en `permanent`, revocada o sin activar. |
 | `POST /admin/v1/licenses/{id}/revoke` | `{ "reason": "≤500" }` | Revocación definitiva. |
 | `POST /admin/v1/licenses/{id}/reset-activation` | | Libera el equipo (borra llave, huella y registro mTLS) y devuelve `{ "license", "activationCode" }` nuevo. |
@@ -433,7 +438,7 @@ Cada cambio sube `revision`; la sucursal lo recibe en su siguiente renovación. 
 
 Subida a R2 por partes, para paquetes de cualquier tamaño:
 
-1. `POST /admin/v1/releases` con `{ "version": "1.4.0", "platform": "linux-x64", "filename": "culinary-1.4.0.deb", "notes": "..." }` → `201 { "release": Versión }` en estado `uploading`. `filename`: `^[A-Za-z0-9][A-Za-z0-9._-]{0,150}\.(exe|deb|apk)$`; `version`: `x.y.z`, única por plataforma.
+1. `POST /admin/v1/releases` con `{ "version": "1.4.0", "platform": "linux-x64", "filename": "culinary-1.4.0.deb", "notes": "..." }` → `201 { "release": Versión }` en estado `uploading`. `filename`: `^[A-Za-z0-9][A-Za-z0-9._-]{0,150}\.(exe|deb|apk)$`, con la extensión de la plataforma (`linux-x64` → `.deb`, `win-x64` → `.exe`, `android-arm64` → `.apk`); `version`: `x.y.z` (hasta 5 dígitos por parte), única por plataforma.
 2. `PUT /admin/v1/releases/{id}/parts/{n}` con los bytes crudos y `Content-Length`, `n` de 1 a 10000 → `{ "partNumber", "etag" }`. Todas las partes salvo la última deben medir al menos 5 MiB, y ninguna puede pasar del límite de cuerpo del plan de Workers (100 MB en Free y Pro). Un paquete pequeño cabe en una sola parte.
 3. `POST /admin/v1/releases/{id}/complete` con `{ "parts": [{ "partNumber": 1, "etag": "..." }] }` → el Worker calcula el SHA-512 de lo que quedó en R2 y firma el manifiesto. `{ "release": Versión }` en estado `ready`.
 
@@ -457,7 +462,7 @@ Subida a R2 por partes, para paquetes de cualquier tamaño:
 
 | Método y ruta | Respuesta |
 |---|---|
-| `GET /admin/v1/tickets?status=open` | `{ "tickets": [{ "id", "licenseId", "customer", "branchName", "siteId", "subject", "status", "createdAt", "updatedAt" }] }`, 200 más recientes |
+| `GET /admin/v1/tickets?status=open` | `{ "tickets": [{ "id", "licenseId", "customer", "branchName", "siteId", "subject", "status", "createdAt", "updatedAt" }] }`, 200 más recientes; `status` opcional: `open`, `answered` o `closed` |
 | `GET /admin/v1/tickets/{id}` | `{ "ticket": Ticket }` con mensajes |
 | `POST /admin/v1/tickets/{id}/messages` con `{ "message": "≤4000" }` | `201 { "ticket": Ticket }`, estado `answered` |
 | `POST /admin/v1/tickets/{id}/close` | `{ "ticket": Ticket }` |
