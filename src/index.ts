@@ -9,41 +9,47 @@ import { ApiError, type App, type Env } from "./http";
 const app = new Hono<App>();
 
 app.use(async (c, next) => {
+
   await migrate(c.env.DB);
   await next();
+
   c.header("cache-control", "no-store");
   c.header("x-content-type-options", "nosniff");
+
 });
 
-// Browsers only reach the panel routes, and only from the origins listed in ADMIN_ORIGINS.
-app.use(
-  "/admin/*",
-  cors({
-    origin: (origin, c) => (c.env.ADMIN_ORIGINS.split(",").map((o: string) => o.trim()).includes(origin) ? origin : null),
-    allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
-    allowHeaders: ["authorization", "content-type", "x-culinary-subject", "x-culinary-challenge", "x-culinary-signature"],
-    maxAge: 600,
-  }),
-);
+app.use("/admin/*", cors({
+
+  origin: (origin, c) => (c.env.ADMIN_ORIGINS.split(",").map((o: string) => o.trim()).includes(origin) ? origin : null),
+  allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
+  allowHeaders: ["authorization", "content-type", "x-culinary-subject", "x-culinary-challenge", "x-culinary-signature"],
+  maxAge: 600
+
+}));
 
 app.route("/branch/v1", branch);
-// The public panel routes go first: adminAccounts and admin carry requireAdmin for every path under /admin/v1.
 app.route("/admin/v1", adminAuth);
 app.route("/admin/v1", adminAccounts);
 app.route("/admin/v1", admin);
-
 app.notFound((c) => c.json({ error: { code: "not_found", message: "Ruta no disponible" } }, 404));
 
 app.onError((error, c) => {
+  
   if (error instanceof ApiError) return c.json({ error: { ...error.extra, code: error.code, message: error.message } }, error.status);
+  
   console.error(error);
+
   return c.json({ error: { code: "internal", message: "Error interno" } }, 500);
 });
 
 export default {
+
   fetch: app.fetch,
   async scheduled(_controller, env) {
+
     await migrate(env.DB);
     await purgeExpired(env.DB, Date.now());
-  },
+
+  }
+
 } satisfies ExportedHandler<Env>;

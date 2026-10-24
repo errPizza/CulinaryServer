@@ -3,6 +3,7 @@ import { signJws, type KeyAlg } from "./crypto";
 import { ApiError, type Env } from "./http";
 
 export type LicenseRow = {
+
   id: string;
   tenant_id: string;
   site_id: string;
@@ -27,15 +28,18 @@ export type LicenseRow = {
   fp_mac: string | null;
   validated_at: string | null;
   central_cert_sha256: string | null;
+
 };
 
 export const LICENSE_STATUSES = ["pending", "active", "expired", "revoked"] as const;
 export type LicenseStatus = (typeof LICENSE_STATUSES)[number];
 
 export function licenseStatus(row: LicenseRow, at = Date.now()): LicenseStatus {
+
   if (row.revoked_at) return "revoked";
   if (!row.activated_at) return "pending";
   if (row.expires_at && Date.parse(row.expires_at) <= at) return "expired";
+ 
   return "active";
 }
 
@@ -43,29 +47,32 @@ export const features = (row: LicenseRow) => JSON.parse(row.features) as string[
 export const limits = (row: LicenseRow) => JSON.parse(row.limits) as Limits;
 
 export async function findLicense(db: D1Database, id: string): Promise<LicenseRow | null> {
+  
   return db.prepare("SELECT * FROM license WHERE id = ?").bind(id).first<LicenseRow>();
 }
 
 export async function getLicense(db: D1Database, id: string): Promise<LicenseRow> {
+  
   const row = await findLicense(db, id);
+  
   if (!row) throw new ApiError(404, "not_found", "Licencia no encontrada");
+  
   return row;
 }
 
-/**
- * Expiry after a panel edit, in order of precedence: permanent never expires, an explicit date wins,
- * a plan change restarts the term from now (or waits for activation), otherwise nothing moves.
- */
 export function nextExpiry(row: LicenseRow, plan: Plan, trialDays: number | null, input: { plan?: Plan; expiresAt?: string }, at = new Date()): string | null {
+  
   if (plan === "permanent") return null;
   if (input.expiresAt) return new Date(input.expiresAt).toISOString();
   if (input.plan && input.plan !== row.plan) return row.activated_at ? (termEnd(plan, trialDays, at)?.toISOString() ?? null) : null;
+  
   return row.expires_at;
 }
 
-/** What the panel sees. Hardware fingerprints stay server-side. */
 export function licenseView(row: LicenseRow) {
+  
   return {
+
     id: row.id,
     tenantId: row.tenant_id,
     siteId: row.site_id,
@@ -84,15 +91,19 @@ export function licenseView(row: LicenseRow) {
     revokedAt: row.revoked_at,
     revokeReason: row.revoke_reason,
     binding: row.binding_kind ? { kind: row.binding_kind, keyAlg: row.key_alg } : null,
-    centralCertificateSha256: row.central_cert_sha256,
+    centralCertificateSha256: row.central_cert_sha256
+
   };
 }
 
-/** Root-signed binding of the branch key to its plan, features and limits. */
 export async function licenseToken(env: Env, row: LicenseRow): Promise<string> {
+
   if (licenseStatus(row) !== "active") throw new Error(`licenseToken for a ${licenseStatus(row)} license`);
+  
   const validatedAt = row.validated_at!;
+  
   return signJws(env.ROOT_PRIVATE_KEY, "culinary-license+jws", {
+
     licenseId: row.id,
     revision: row.revision,
     tenantId: row.tenant_id,
@@ -108,16 +119,15 @@ export async function licenseToken(env: Env, row: LicenseRow): Promise<string> {
     validatedAt,
     offlineUntil: new Date(Date.parse(validatedAt) + OFFLINE_GRACE_MS).toISOString(),
     key: { alg: row.key_alg, spki: row.key_spki },
-    binding: row.binding_kind,
+    binding: row.binding_kind
+
   });
 }
 
-/**
- * Signed so the branch locks itself only on the root's word, not on an unauthenticated error.
- * Echoes the request's challenge so an old notice cannot be replayed into a later response.
- */
 export async function statusNotice(env: Env, row: LicenseRow, challenge: string): Promise<string> {
+
   return signJws(env.ROOT_PRIVATE_KEY, "culinary-license-status+jws", {
+
     licenseId: row.id,
     revision: row.revision,
     siteId: row.site_id,
@@ -125,13 +135,16 @@ export async function statusNotice(env: Env, row: LicenseRow, challenge: string)
     plan: row.plan,
     expiresAt: row.expires_at,
     revokedAt: row.revoked_at,
-    challenge,
+    challenge
+
   });
 }
 
-/** `allowExpired` lets an expired branch still reach support to ask for the renewal. */
 export async function requireUsable(env: Env, row: LicenseRow, options: { challenge: string; allowExpired?: boolean }): Promise<void> {
+  
   const status = licenseStatus(row);
+  
   if (status === "revoked") throw new ApiError(403, "license_revoked", "Licencia revocada", { notice: await statusNotice(env, row, options.challenge) });
   if (status === "expired" && !options.allowExpired) throw new ApiError(403, "license_expired", "Licencia vencida", { notice: await statusNotice(env, row, options.challenge) });
+
 }

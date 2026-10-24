@@ -66,13 +66,13 @@ async function consumeEnrollmentCode(env: App["Bindings"], code: string): Promis
   return invite;
 }
 
-// Session plus a fresh device signature, so a stolen session token alone cannot add or remove admins.
 async function requireFreshSignature(c: Ctx): Promise<void> {
 
   const request = await readSigned(c);
   const admin = await adminByUsername(c.env.DB, request.subject);
 
   if (!admin || admin.id !== c.var.admin.id || !(await verifySigned(c, "admin", request, admin.key_alg, admin.key_spki))) throw new ApiError(401, "unauthorized", "Firma del dispositivo requerida");
+
 }
 
 export const adminAuth = new Hono<App>();
@@ -96,8 +96,7 @@ adminAuth.post("/enroll", async (c) => {
   const secret = newTotpSecret();
   const insert = c.env.DB.batch([
     c.env.DB.prepare("DELETE FROM admin WHERE username = ? AND active = 0").bind(input.username),
-    c.env.DB.prepare("INSERT INTO admin (id, username, password_hash, totp_secret, key_alg, key_spki, device_name, invited_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
-    .bind(id, input.username, await hashPassword(input.password), secret, input.key.alg, input.key.spki, input.deviceName, invitedBy, new Date().toISOString())
+    c.env.DB.prepare("INSERT INTO admin (id, username, password_hash, totp_secret, key_alg, key_spki, device_name, invited_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(id, input.username, await hashPassword(input.password), secret, input.key.alg, input.key.spki, input.deviceName, invitedBy, new Date().toISOString())
   ]);
 
   await uniqueOr409(insert, "Ese usuario ya existe");
@@ -141,8 +140,6 @@ adminAuth.post("/login", async (c) => {
   if (admin.locked_until > Date.now()) throw new ApiError(429, "rate_limited", "Cuenta bloqueada temporalmente por intentos fallidos");
 
   const step = (await verifyPassword(input.password, admin.password_hash)) ? await verifyTotp(admin.totp_secret, input.totp, Date.now(), admin.totp_last_step) : null;
-
-  // Both counters change in SQL, so parallel attempts cannot share a failure count or reuse a TOTP step.
   const accepted = step !== null && (await c.env.DB.prepare("UPDATE admin SET failed_logins = 0, locked_until = 0, totp_last_step = ?1 WHERE id = ?2 AND totp_last_step < ?1 RETURNING id").bind(step, admin.id).first());
 
   if (!accepted) {
