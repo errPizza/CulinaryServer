@@ -141,7 +141,7 @@ export async function signJws(root: RootKey, typ: string, payload: unknown): Pro
   return `${header}.${body}.${toBase64Url(new Uint8Array(signature))}`;
 }
 
-// Workers caps PBKDF2 at 100,000 iterations; TOTP and the device signature make up the rest of the login.
+// Kept at 100,000 to stay within Workers CPU limits; TOTP and the device signature carry the rest of the login.
 const PBKDF2_ITERATIONS = 100_000;
 
 async function pbkdf2(password: string, salt: Uint8Array<ArrayBuffer>, iterations: number): Promise<Uint8Array<ArrayBuffer>> {

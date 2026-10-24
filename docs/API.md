@@ -1,0 +1,481 @@
+# API de CulinaryServer
+
+Contrato entre el Worker y sus dos únicos clientes:
+
+- **Culinary Restaurant** (servidor de sucursal en CulinaryOS): rutas `/branch/v1/*`.
+- **CulinaryAdmin** (panel del proveedor): rutas `/admin/v1/*`.
+
+Cualquier otra ruta responde `404`. Todas las respuestas llevan `Cache-Control: no-store`.
+
+## 1. Convenciones
+
+| Concepto | Formato |
+|---|---|
+| Cuerpos | JSON UTF-8, `Content-Type: application/json`, máximo 64 KiB (salvo las partes de paquetes). Los objetos son estrictos: un campo desconocido da `400`. |
+| Fechas | ISO 8601 en UTC con milisegundos, por ejemplo `2026-10-24T15:04:05.123Z`. |
+| base64url | RFC 4648 §5, **sin relleno** `=`. |
+| Llave pública | SubjectPublicKeyInfo DER en base64url (`spki`). Ed25519 mide 44 bytes; P-256, 91. |
+| Algoritmos de llave | `Ed25519` o `ES256` (ECDSA P-256 con SHA-256). |
+| Firma Ed25519 | 64 bytes (RFC 8032). |
+| Firma ES256 | 64 bytes **r ‖ s** (IEEE P1363), no DER. En .NET: `ECDsa.SignData(data, HashAlgorithmName.SHA256, DSASignatureFormat.IeeeP1363FixedFieldConcatenation)`. Un TPM entrega r y s por separado: rellena cada uno a 32 bytes y concaténalos. |
+| SHA-256 / SHA-512 | Hexadecimal en minúsculas. |
+| Identificadores | `licenseId`, `ticketId`, `releaseId`, etc. son UUID en minúsculas. |
+
+### Errores
+
+```json
+{ "error": { "code": "license_expired", "message": "Licencia vencida", "notice": "<JWS opcional>" } }
+```
+
+| HTTP | `code` | Cuándo |
+|---|---|---|
+| 400 | `bad_request` | JSON inválido, campo faltante, desconocido o fuera de rango. `message` indica el campo. |
+| 401 | `unauthorized` | Falta la firma, el reto ya se usó o venció, la firma no corresponde, o la sesión del panel no es válida. |
+| 403 | `forbidden` | Código de alta o invitación inválidos. |
+| 403 | `activation_rejected` | Código de activación inválido, ya usado o licencia revocada. |
+| 403 | `license_expired` | Licencia vencida. Incluye `notice`. |
+| 403 | `license_revoked` | Licencia revocada. Incluye `notice`. |
+| 403 | `binding_mismatch` | La huella de hardware no coincide con la del equipo activado. |
+| 404 | `not_found` | Ruta o registro inexistente. |
+| 409 | `conflict` | Estado incompatible (siteId repetido, versión repetida, licencia revocada, etc.). |
+| 413 | `too_large` | Cuerpo mayor al límite. |
+| 429 | `rate_limited` | Demasiados retos pendientes, tickets abiertos o cuenta del panel bloqueada. |
+| 500 | `internal` | Error no previsto. |
+| 503 | `server_misconfigured` | Falta un secreto del Worker (`ROOT_PRIVATE_KEY`). |
+
+## 2. Solicitudes firmadas con reto
+
+Las usan la sucursal (después de activar) y el panel para confirmar el alta e iniciar sesión.
+
+### 2.1 Pedir el reto
+
+`POST /branch/v1/challenges` con `{ "licenseId": "<uuid>" }`, o `POST /admin/v1/challenges` con `{ "username": "<usuario>" }`.
+
+```json
+{ "nonce": "p0Xh3...base64url de 32 bytes", "expiresAt": "2026-10-24T15:06:05.123Z" }
+```
+
+- Vale **2 minutos** y **una sola vez**: se consume en cuanto el Worker lo recibe, aunque la firma falle. Pide uno nuevo por cada solicitud firmada.
+- Máximo 10 retos pendientes por licencia o usuario (`429`).
+- Para una licencia o un usuario inexistente la respuesta tiene el mismo aspecto, pero ese reto nunca será aceptado.
+
+### 2.2 Firmar
+
+Cadena a firmar: siete líneas unidas con `\n` (LF, sin salto final), codificadas en UTF-8:
+
+```
+culinary-request-v1
+<scope>              branch | admin
+<MÉTODO>             en mayúsculas: GET, POST, PUT
+<ruta>               ruta absoluta con la query tal como se envía, sin host: /branch/v1/license/renew
+<subject>            licenseId (sucursal) o username (panel)
+<nonce>              el nonce del reto
+<sha256(cuerpo)>     SHA-256 en hex de los bytes exactos del cuerpo; sin cuerpo, el de la cadena vacía
+```
+
+SHA-256 de la cadena vacía: `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`.
+
+Cabeceras:
+
+| Cabecera | Valor |
+|---|---|
+| `X-Culinary-Subject` | `licenseId` o `username` |
+| `X-Culinary-Challenge` | `nonce` |
+| `X-Culinary-Signature` | firma en base64url |
+
+Ejemplo en C# para la sucursal:
+
+```csharp
+var body = JsonSerializer.SerializeToUtf8Bytes(payload);           // estos mismos bytes van en la solicitud
+var bodyHash = Convert.ToHexStringLower(SHA256.HashData(body));
+var input = Encoding.UTF8.GetBytes(string.Join("\n",
+    "culinary-request-v1", "branch", "POST", "/branch/v1/license/renew", licenseId, nonce, bodyHash));
+var signature = key.Sign(input);                                   // Ed25519 o ES256 P1363
+request.Headers.Add("X-Culinary-Subject", licenseId);
+request.Headers.Add("X-Culinary-Challenge", nonce);
+request.Headers.Add("X-Culinary-Signature", Base64Url.EncodeToString(signature));
+```
+
+## 3. Documentos firmados por la raíz
+
+El Worker firma con la llave raíz Ed25519 en formato **JWS compacto** (RFC 7515, `alg` `EdDSA` de RFC 8037):
+
+```
+base64url(header) "." base64url(payload) "." base64url(firma)
+header = { "alg": "EdDSA", "typ": "<tipo>", "kid": "<16 caracteres>" }
+```
+
+La firma cubre los bytes ASCII de `base64url(header) + "." + base64url(payload)`. No hay que canonicalizar JSON: se verifica sobre lo recibido.
+
+| `typ` | Contenido |
+|---|---|
+| `culinary-license+jws` | Licencia de uso (sección 4.3). |
+| `culinary-license-status+jws` | Aviso de vencimiento o revocación (sección 4.4). |
+| `culinary-release+jws` | Manifiesto de un paquete, independiente de la licencia (sección 4.5). |
+| `culinary-update+jws` | Actualización dirigida a una licencia (sección 4.5). |
+
+Al verificar, la sucursal debe:
+
+1. Verificar la firma con la llave pública raíz **aprovisionada en el equipo**, nunca con una recibida por red. El panel la muestra en `GET /admin/v1/root-key`; `kid` sirve solo para detectar una raíz distinta.
+2. Comprobar que `alg` es `EdDSA` y que `typ` es el esperado para ese uso. Un documento de un tipo no vale como otro.
+3. Rechazar un payload con `v` distinto de `1`.
+
+## 4. Culinary Restaurant (`/branch/v1`)
+
+### 4.1 Huella de hardware
+
+Solo cuando el equipo no tiene TPM 2.0. Cada parte se envía como `sha256hex` de la cadena indicada, en UTF-8:
+
+| Campo | Cadena de entrada |
+|---|---|
+| `board` | `culinary-hw-v1|board|` + UUID de la placa (`/sys/class/dmi/id/product_uuid`) en minúsculas |
+| `disk` | `culinary-hw-v1|disk|` + número de serie del disco del sistema, sin espacios al inicio ni al final |
+| `mac` | `culinary-hw-v1|mac|` + MAC de la interfaz física principal en minúsculas, con `:` |
+
+En la renovación deben coincidir **al menos dos de las tres**, así que cambiar un disco o una tarjeta de red no bloquea la sucursal. Si cambian dos, el proveedor libera el equipo desde el panel (sección 5.3).
+
+### 4.2 Activación
+
+La primera vez, con el código que entrega el panel. La sucursal genera su llave de licencia:
+
+- **Con TPM 2.0:** llave ECC P-256 no exportable dentro del TPM (`alg: "ES256"`, `binding.kind: "tpm"`).
+- **Sin TPM:** llave Ed25519 (o P-256) guardada cifrada en el almacén (`binding.kind: "fingerprint"`).
+
+1. `POST /branch/v1/challenges` → `nonce`.
+2. `POST /branch/v1/activate`, firmada (sección 2) con la llave nueva. `X-Culinary-Subject` es el `licenseId`.
+
+```json
+{
+  "activationCode": "K7Q2M-9XWZT-4HPLA-R3VNE",
+  "key": { "alg": "ES256", "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE..." },
+  "binding": { "kind": "tpm" }
+}
+```
+
+Sin TPM: `"binding": { "kind": "fingerprint", "fingerprint": { "board": "<hex64>", "disk": "<hex64>", "mac": "<hex64>" } }`.
+
+El código no distingue mayúsculas, guiones ni espacios. Respuesta `200`:
+
+```json
+{ "license": "<JWS culinary-license+jws>" }
+```
+
+El código sirve una sola vez. El plazo de la prueba, mensual o anual empieza en este momento, salvo que el panel haya fijado `expiresAt` antes.
+
+### 4.3 Licencia de uso
+
+Payload de `culinary-license+jws`:
+
+```json
+{
+  "v": 1,
+  "licenseId": "0b6c5c1e-3f0a-4d39-9f5e-1d2a8f3c7b10",
+  "revision": 4,
+  "tenantId": "grupo-plaza",
+  "siteId": "plaza-centro",
+  "customer": "Restaurante La Plaza",
+  "branchName": "Centro",
+  "plan": "monthly",
+  "status": "active",
+  "features": ["printing", "reservations"],
+  "limits": { "maxUsers": 15, "maxTables": 30 },
+  "activatedAt": "2026-10-24T15:04:05.123Z",
+  "expiresAt": "2026-11-24T15:04:05.123Z",
+  "validatedAt": "2026-10-25T09:00:00.000Z",
+  "offlineUntil": "2026-10-28T09:00:00.000Z",
+  "key": { "alg": "ES256", "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE..." },
+  "binding": "tpm",
+  "iat": "2026-10-25T09:00:00.000Z"
+}
+```
+
+| Campo | Significado |
+|---|---|
+| `plan` | `trial`, `monthly`, `annual` o `permanent`. |
+| `expiresAt` | Fin del plazo pagado; `null` en `permanent`. |
+| `validatedAt` | Última vez que el Worker validó la licencia. |
+| `offlineUntil` | `validatedAt` + 3 días: gracia sin conexión. |
+| `features` | Subconjunto de `reservations`, `reviews`, `customerRequests`, `printing`, `courses`, `promotions`, `multiBranch` (igual a `Restaurant.Modules`). |
+| `limits` | `maxUsers` y `maxTables`, de 1 a 10000. |
+| `key` | Llave de la licencia: la sucursal debe tener su privada. Certificada por la raíz junto con el resto. |
+| `revision` | Sube con cada cambio del panel. La sucursal rechaza una licencia con revisión menor a la guardada. |
+
+Reglas que la sucursal hace cumplir del lado de su servidor:
+
+- `siteId` debe ser el de la sucursal y `key.spki` el de su propia llave.
+- Licencia usable mientras `ahora < offlineUntil` **y** (`expiresAt` es `null` **o** `ahora < expiresAt`).
+- Si no es usable: pantalla de bloqueo con `plan` y `expiresAt`, sin exportar datos.
+- Renovar al menos una vez al día mientras haya conexión.
+
+### 4.4 Renovación
+
+`POST /branch/v1/license/renew`, firmada con la llave de la licencia.
+
+```json
+{ "fingerprint": { "board": "<hex64>", "disk": "<hex64>", "mac": "<hex64>" } }
+```
+
+Con TPM, cuerpo `{}`. Respuesta `200`: `{ "license": "<JWS culinary-license+jws>" }` con `validatedAt` nuevo.
+
+Una licencia vencida o revocada no se renueva: `403` con `code` `license_expired` o `license_revoked` y `notice`, un JWS `culinary-license-status+jws`:
+
+```json
+{
+  "v": 1,
+  "licenseId": "0b6c5c1e-3f0a-4d39-9f5e-1d2a8f3c7b10",
+  "siteId": "plaza-centro",
+  "status": "expired",
+  "plan": "monthly",
+  "expiresAt": "2026-11-24T15:04:05.123Z",
+  "revokedAt": null,
+  "iat": "2026-11-25T08:00:00.000Z"
+}
+```
+
+Al recibir un aviso válido la sucursal se bloquea de inmediato, sin esperar a que acabe la gracia. Un `403` sin `notice` válido no bloquea por sí solo: puede venir de un intermediario.
+
+Otros errores: `401` (firma o reto), `403 binding_mismatch`.
+
+### 4.5 Actualizaciones
+
+**Consultar**: `POST /branch/v1/updates/check`, firmada. Solo con licencia activa.
+
+```json
+{ "platform": "linux-x64", "currentVersion": "1.3.2" }
+```
+
+`platform`: `linux-x64`, `win-x64` o `android-arm64`. Si no hay nada más nuevo para esta licencia: `{ "update": null }`. Si hay:
+
+```json
+{
+  "update": "<JWS culinary-update+jws>",
+  "release": "<JWS culinary-release+jws>",
+  "download": {
+    "path": "/branch/v1/downloads/5f1d0c9a-6a7e-4b1e-8d0b-2b7c1e9f4a33",
+    "token": "<base64url>",
+    "expiresAt": "2026-10-25T10:00:00.000Z"
+  }
+}
+```
+
+Payload de `culinary-update+jws`:
+
+```json
+{
+  "v": 1,
+  "licenseId": "0b6c5c1e-3f0a-4d39-9f5e-1d2a8f3c7b10",
+  "siteId": "plaza-centro",
+  "releaseId": "5f1d0c9a-6a7e-4b1e-8d0b-2b7c1e9f4a33",
+  "version": "1.4.0",
+  "platform": "linux-x64",
+  "filename": "culinary-1.4.0.deb",
+  "bytes": 48213004,
+  "sha512": "<hex128>",
+  "notes": "Corrige impresión",
+  "iat": "2026-10-25T09:00:00.000Z",
+  "exp": "2026-10-25T10:00:00.000Z"
+}
+```
+
+El payload de `culinary-release+jws` lleva `v`, `releaseId`, `version`, `platform`, `filename`, `bytes`, `sha512` e `iat`.
+
+**Descargar**: `GET <download.path>` con `Authorization: Bearer <download.token>`. No lleva firma de reto, así que se puede reanudar con `Range: bytes=<inicio>-<fin>` (`206` con `Content-Range`) durante la hora que vale el permiso.
+
+Antes de instalar, la sucursal comprueba:
+
+1. `update` firmado por la raíz, `typ` `culinary-update+jws`, con su `licenseId` y su `siteId`, y `exp` sin vencer.
+2. La versión es mayor que la instalada.
+3. El tamaño y el SHA-512 del archivo descargado coinciden con `bytes` y `sha512`.
+
+### 4.6 Soporte
+
+Firmadas con la llave de la licencia. Se permiten con licencia vencida (para pedir la renovación), no con revocada.
+
+| Método y ruta | Cuerpo | Respuesta |
+|---|---|---|
+| `POST /branch/v1/tickets` | `{ "subject": "≤150", "message": "≤4000" }` | `201 { "ticket": Ticket }` |
+| `GET /branch/v1/tickets` | sin cuerpo | `200 { "tickets": [Ticket] }`, los 50 más recientes |
+| `POST /branch/v1/tickets/{id}/messages` | `{ "message": "≤4000" }` | `201 { "ticket": Ticket }` |
+
+```json
+{
+  "id": "c2f5...", "licenseId": "0b6c...", "subject": "No imprime",
+  "status": "answered",
+  "createdAt": "...", "updatedAt": "...",
+  "messages": [
+    { "id": "...", "author": "branch", "adminId": null, "body": "La impresora de cocina no responde", "createdAt": "..." },
+    { "id": "...", "author": "admin", "adminId": "9a1e...", "body": "Reinicia el servicio de impresión", "createdAt": "..." }
+  ]
+}
+```
+
+`status`: `open` (espera al proveedor), `answered` (respondió el proveedor), `closed`. Un mensaje de la sucursal lo vuelve a `open`. Límites: 20 tickets no cerrados por licencia, 100 mensajes por ticket.
+
+### 4.7 Registro para la central multiempresa
+
+`PUT /branch/v1/registry`, firmada. Registra la huella SHA-256 del certificado cliente mTLS que la sucursal usa contra `MesaNexo.Central` (puertos `/v1/events`, `/v1/cloud/*`).
+
+```json
+{ "centralCertificateSha256": "<hex64>" }
+```
+
+Respuesta `200`: `{ "siteId": "...", "tenantId": "...", "centralCertificateSha256": "..." }`. `409` si otra sucursal ya registró ese certificado. Liberar el equipo desde el panel borra el registro.
+
+## 5. CulinaryAdmin (`/admin/v1`)
+
+### 5.1 Alta de administradores e inicio de sesión
+
+Cada cuenta corresponde a **un dispositivo**: una llave Ed25519 o P-256 que el panel genera y guarda sin poder exportarla (WebCrypto `extractable: false` o el almacén del sistema). Para otro equipo se invita una cuenta nueva y se borra la anterior.
+
+**Alta**: `POST /admin/v1/enroll` (sin firma):
+
+```json
+{
+  "code": "<ADMIN_SETUP_CODE o invitación>",
+  "username": "proveedor",
+  "password": "mínimo 12 caracteres",
+  "deviceName": "Laptop oficina",
+  "key": { "alg": "Ed25519", "spki": "MCowBQYDK2VwAyEA..." }
+}
+```
+
+- `username`: `^[a-z0-9._-]{3,32}$`. `password`: de 12 a 256 caracteres.
+- El primer administrador usa `ADMIN_SETUP_CODE`, que solo vale mientras no exista ningún administrador activo. Los demás usan una invitación (`POST /admin/v1/invites`), de un solo uso y válida 24 horas.
+
+Respuesta `201`:
+
+```json
+{ "adminId": "...", "totp": { "secret": "BASE32...", "uri": "otpauth://totp/CulinaryAdmin:proveedor?secret=...&issuer=CulinaryAdmin&algorithm=SHA1&digits=6&period=30" } }
+```
+
+El panel muestra `uri` como código QR una sola vez. TOTP: RFC 6238, SHA-1, 6 dígitos, 30 s, se acepta un paso de desfase y cada código vale una vez.
+
+**Confirmar**: `POST /admin/v1/enroll/confirm`, firmada (scope `admin`, subject = `username`) con la llave del alta: `{ "totp": "123456" }` → `200 { "adminId", "username" }`. Hasta confirmar no se puede iniciar sesión, y una cuenta sin confirmar se borra a las 24 horas.
+
+**Iniciar sesión**: `POST /admin/v1/login`, firmada igual:
+
+```json
+{ "password": "...", "totp": "654321" }
+```
+
+```json
+{ "token": "<base64url>", "expiresAt": "2026-10-24T23:04:05.123Z", "admin": { "id": "...", "username": "proveedor" } }
+```
+
+- Tres factores: llave del dispositivo, contraseña y TOTP. Cualquier fallo responde `401` con el mismo mensaje.
+- Cinco fallos con firma válida bloquean la cuenta 15 minutos (`429`).
+- La sesión dura 8 horas. Las demás rutas piden `Authorization: Bearer <token>`.
+
+| Método y ruta | Respuesta |
+|---|---|
+| `GET /admin/v1/me` | `{ "admin": { "id", "username" } }` |
+| `POST /admin/v1/logout` | `{ "ok": true }` |
+| `POST /admin/v1/invites` | `201 { "code": "XXXXX-XXXXX-XXXXX-XXXXX", "expiresAt" }` |
+| `GET /admin/v1/admins` | `{ "admins": [{ "id", "username", "deviceName", "keyAlg", "active", "createdAt" }] }` |
+| `DELETE /admin/v1/admins/{id}` | `{ "ok": true }`; no permite borrarse a sí mismo |
+| `GET /admin/v1/root-key` | `{ "kid", "alg": "EdDSA", "publicKey": "<32 bytes base64url>", "spki", "pem" }` |
+| `GET /admin/v1/audit?before=<id>` | `{ "entries": [{ "id", "at", "adminId", "action", "target", "detail" }] }`, 100 por página |
+
+### 5.2 Licencias
+
+**Crear**: `POST /admin/v1/licenses`:
+
+```json
+{
+  "customer": "Restaurante La Plaza",
+  "branchName": "Centro",
+  "siteId": "plaza-centro",
+  "tenantId": "grupo-plaza",
+  "plan": "trial",
+  "trialDays": 14,
+  "features": ["printing", "reservations"],
+  "limits": { "maxUsers": 15, "maxTables": 30 }
+}
+```
+
+- `siteId`: `^[a-z0-9-]{1,32}$`, único. Es el `siteId` de la sucursal.
+- `tenantId`: `^[a-z0-9-]{1,64}$`, opcional. Agrupa las sucursales de una misma empresa; si falta se genera uno.
+- `trialDays` (1 a 365) va solo con `plan: "trial"`.
+
+Respuesta `201`: `{ "license": Licencia, "activationCode": "XXXXX-XXXXX-XXXXX-XXXXX" }`. El código se muestra una sola vez.
+
+Licencia en el panel:
+
+```json
+{
+  "id": "...", "tenantId": "grupo-plaza", "siteId": "plaza-centro",
+  "customer": "Restaurante La Plaza", "branchName": "Centro",
+  "plan": "trial", "trialDays": 14,
+  "features": ["printing", "reservations"], "limits": { "maxUsers": 15, "maxTables": 30 },
+  "revision": 1,
+  "status": "pending",
+  "createdAt": "...", "activatedAt": null, "expiresAt": null, "validatedAt": null,
+  "revokedAt": null, "revokeReason": null,
+  "binding": null,
+  "centralCertificateSha256": null
+}
+```
+
+`status`: `pending` (sin activar), `active`, `expired` o `revoked`. `binding`: `null` o `{ "kind": "tpm" | "fingerprint", "keyAlg": "ES256" | "Ed25519" }`.
+
+| Método y ruta | Cuerpo | Efecto |
+|---|---|---|
+| `GET /admin/v1/licenses?tenantId=&status=` | | `{ "licenses": [Licencia] }` |
+| `GET /admin/v1/licenses/{id}` | | `{ "license": Licencia }` |
+| `PATCH /admin/v1/licenses/{id}` | cualquiera de `customer`, `branchName`, `plan`, `trialDays`, `features`, `limits`, `expiresAt` | Editar, habilitar o quitar funciones. Cambiar `plan` en una licencia activada reinicia el plazo desde ahora; `expiresAt` (futuro) lo fija a mano. |
+| `POST /admin/v1/licenses/{id}/renew` | `{}` o `{ "until": "<ISO futuro>" }` | Sin `until`, suma un periodo (mes, año o `trialDays`) al vencimiento vigente o a ahora, lo que sea posterior. `409` en `permanent`, revocada o sin activar. |
+| `POST /admin/v1/licenses/{id}/revoke` | `{ "reason": "≤500" }` | Revocación definitiva. |
+| `POST /admin/v1/licenses/{id}/reset-activation` | | Libera el equipo (borra llave, huella y registro mTLS) y devuelve `{ "license", "activationCode" }` nuevo. |
+
+Cada cambio sube `revision`; la sucursal lo recibe en su siguiente renovación. Una licencia revocada no admite cambios (`409`).
+
+### 5.3 Versiones y publicaciones
+
+Subida a R2 por partes, para paquetes de cualquier tamaño:
+
+1. `POST /admin/v1/releases` con `{ "version": "1.4.0", "platform": "linux-x64", "filename": "culinary-1.4.0.deb", "notes": "..." }` → `201 { "release": Versión }` en estado `uploading`. `filename`: `^[A-Za-z0-9][A-Za-z0-9._-]{0,150}\.(exe|deb|apk)$`; `version`: `x.y.z`, única por plataforma.
+2. `PUT /admin/v1/releases/{id}/parts/{n}` con los bytes crudos y `Content-Length`, `n` de 1 a 10000 → `{ "partNumber", "etag" }`. Todas las partes salvo la última deben medir al menos 5 MiB, y ninguna puede pasar del límite de cuerpo del plan de Workers (100 MB en Free y Pro). Un paquete pequeño cabe en una sola parte.
+3. `POST /admin/v1/releases/{id}/complete` con `{ "parts": [{ "partNumber": 1, "etag": "..." }] }` → el Worker calcula el SHA-512 de lo que quedó en R2 y firma el manifiesto. `{ "release": Versión }` en estado `ready`.
+
+`DELETE /admin/v1/releases/{id}` cancela una subida sin terminar.
+
+```json
+{ "id": "...", "version": "1.4.0", "platform": "linux-x64", "filename": "culinary-1.4.0.deb", "notes": "...",
+  "status": "ready", "bytes": 48213004, "sha512": "<hex128>", "manifest": "<JWS culinary-release+jws>", "createdAt": "..." }
+```
+
+**Publicar**: `POST /admin/v1/publications`:
+
+```json
+{ "releaseId": "...", "target": "all" }
+{ "releaseId": "...", "target": { "licenseIds": ["0b6c...", "7d2e..."] } }
+```
+
+→ `201 { "publication": { "id", "releaseId", "target", "createdAt", "withdrawnAt" } }`. `GET /admin/v1/publications` las lista y `POST /admin/v1/publications/{id}/withdraw` retira una. La sucursal recibe la versión más nueva de su plataforma que alguna publicación vigente le dirija.
+
+### 5.4 Soporte
+
+| Método y ruta | Respuesta |
+|---|---|
+| `GET /admin/v1/tickets?status=open` | `{ "tickets": [{ "id", "licenseId", "customer", "branchName", "siteId", "subject", "status", "createdAt", "updatedAt" }] }`, 200 más recientes |
+| `GET /admin/v1/tickets/{id}` | `{ "ticket": Ticket }` con mensajes |
+| `POST /admin/v1/tickets/{id}/messages` con `{ "message": "≤4000" }` | `201 { "ticket": Ticket }`, estado `answered` |
+| `POST /admin/v1/tickets/{id}/close` | `{ "ticket": Ticket }` |
+
+### 5.5 Registro de sucursales
+
+`GET /admin/v1/registry?tenantId=grupo-plaza`, sin licencias revocadas:
+
+```json
+{
+  "branches": [
+    {
+      "tenantId": "grupo-plaza", "tenantName": "Restaurante La Plaza",
+      "branchId": "0b6c...", "siteId": "plaza-centro", "slug": "plaza-centro", "branchName": "Centro",
+      "certificateSha256": "<hex64 o null>", "licenseStatus": "active", "features": ["multiBranch"]
+    }
+  ]
+}
+```
+
+Cada fila trae los campos de sucursal del archivo `--provision-tenant` de `MesaNexo.Central` (`tenantId`, `branchId`, `siteId`, `slug`, `certificateSha256`, `tenantName`, `branchName`). Las credenciales del dueño no pasan por este Worker.

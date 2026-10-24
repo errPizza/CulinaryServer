@@ -57,9 +57,13 @@ admin.get("/root-key", async (c) => {
 });
 
 admin.get("/audit", async (c) => {
-  const before = Number(c.req.query("before") ?? Number.MAX_SAFE_INTEGER);
-  const { results } = await c.env.DB.prepare("SELECT * FROM audit WHERE id < ? ORDER BY id DESC LIMIT 100").bind(before).all();
-  return c.json({ entries: results.map((e) => ({ ...e, detail: e.detail ? JSON.parse(e.detail as string) : null })) });
+  const before = Math.trunc(Number(c.req.query("before"))) || Number.MAX_SAFE_INTEGER;
+  const { results } = await c.env.DB.prepare("SELECT * FROM audit WHERE id < ? ORDER BY id DESC LIMIT 100")
+    .bind(before)
+    .all<{ id: number; at: string; admin_id: string | null; action: string; target: string | null; detail: string | null }>();
+  return c.json({
+    entries: results.map((e) => ({ id: e.id, at: e.at, adminId: e.admin_id, action: e.action, target: e.target, detail: e.detail ? JSON.parse(e.detail) : null })),
+  });
 });
 
 admin.post("/licenses", async (c) => {
