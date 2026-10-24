@@ -8,7 +8,10 @@ export type Plan = (typeof PLANS)[number];
 
 export const PLATFORMS = ["linux-x64", "win-x64", "android-arm64"] as const;
 
-export const OFFLINE_GRACE_MS = 3 * 24 * 60 * 60 * 1000;
+export const DAY_MS = 24 * 60 * 60 * 1000;
+export const OFFLINE_GRACE_MS = 3 * DAY_MS;
+
+export const VERSION_PATTERN = /^(\d{1,5})\.(\d{1,5})\.(\d{1,5})$/;
 
 export const limitsSchema = z.strictObject({
   maxUsers: z.int().min(1).max(10_000),
@@ -33,7 +36,7 @@ export function termEnd(plan: Plan, trialDays: number | null, from: Date): Date 
     case "permanent":
       return null;
     case "trial":
-      return new Date(from.getTime() + (trialDays ?? 0) * 24 * 60 * 60 * 1000);
+      return new Date(from.getTime() + (trialDays ?? 0) * DAY_MS);
     case "monthly":
       return addMonths(from, 1);
     case "annual":

@@ -1,17 +1,21 @@
 import { z } from "zod";
-import { PLATFORMS } from "./catalog";
+import { PLATFORMS, VERSION_PATTERN } from "./catalog";
 import { randomToken, rootKey, sha256Hex, signJws, toHex } from "./crypto";
-import { ApiError, type Ctx, type Env } from "./http";
+import { ApiError, bearerHash, uniqueOr409, type Ctx, type Env } from "./http";
 import { licenseStatus, type LicenseRow } from "./licenses";
 
 const DOWNLOAD_TTL_MS = 60 * 60 * 1000;
 
-export const releaseSchema = z.strictObject({
-  version: z.string().regex(/^\d{1,5}\.\d{1,5}\.\d{1,5}$/, "Versión semántica x.y.z"),
-  platform: z.enum(PLATFORMS),
-  filename: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,150}\.(exe|deb|apk)$/, "Nombre de paquete .exe, .deb o .apk"),
-  notes: z.string().max(4000).default(""),
-});
+const PACKAGE_EXTENSION = { "linux-x64": ".deb", "win-x64": ".exe", "android-arm64": ".apk" } as const satisfies Record<(typeof PLATFORMS)[number], string>;
+
+export const releaseSchema = z
+  .strictObject({
+    version: z.string().regex(VERSION_PATTERN, "Versión semántica x.y.z"),
+    platform: z.enum(PLATFORMS),
+    filename: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,150}\.(exe|deb|apk)$/, "Nombre de paquete .exe, .deb o .apk"),
+    notes: z.string().max(4000).default(""),
+  })
+  .refine((r) => r.filename.endsWith(PACKAGE_EXTENSION[r.platform]), { message: "La extensión no corresponde a la plataforma", path: ["filename"] });
 
 export const completeSchema = z.strictObject({
   parts: z.array(z.strictObject({ partNumber: z.int().min(1).max(10_000), etag: z.string().min(1).max(200) })).min(1).max(10_000),
@@ -48,15 +52,22 @@ async function getRelease(db: D1Database, id: string): Promise<ReleaseRow> {
   return row;
 }
 
+const DUPLICATE_VERSION = "Ya existe esa versión para la plataforma";
+
 export async function createRelease(env: Env, input: z.infer<typeof releaseSchema>) {
+  // Checked first so the common duplicate does not open a multipart upload in R2 for nothing.
   const exists = await env.DB.prepare("SELECT id FROM release WHERE platform = ? AND version = ?").bind(input.platform, input.version).first();
-  if (exists) throw new ApiError(409, "conflict", "Ya existe esa versión para la plataforma");
+  if (exists) throw new ApiError(409, "conflict", DUPLICATE_VERSION);
   const row: ReleaseRow = { id: crypto.randomUUID(), ...input, status: "uploading", upload_id: null, bytes: null, sha512: null, manifest: null, created_at: new Date().toISOString() };
   const upload = await env.PACKAGES.createMultipartUpload(objectKey(row));
   row.upload_id = upload.uploadId;
-  await env.DB.prepare("INSERT INTO release (id, version, platform, filename, notes, status, upload_id, created_at) VALUES (?, ?, ?, ?, ?, 'uploading', ?, ?)")
+  const insert = env.DB.prepare("INSERT INTO release (id, version, platform, filename, notes, status, upload_id, created_at) VALUES (?, ?, ?, ?, ?, 'uploading', ?, ?)")
     .bind(row.id, row.version, row.platform, row.filename, row.notes, row.upload_id, row.created_at)
     .run();
+  await uniqueOr409(insert, DUPLICATE_VERSION).catch(async (error) => {
+    await upload.abort();
+    throw error;
+  });
   return releaseView(row);
 }
 
@@ -76,24 +87,30 @@ export async function uploadPart(c: Ctx, id: string, partNumber: number) {
   return { partNumber: part.partNumber, etag: part.etag };
 }
 
-/** Hashes what R2 actually stored, then signs the manifest with the root key. */
+/**
+ * Hashes what R2 actually stored, then signs the manifest with the root key.
+ * Retrying is safe: when an earlier call already completed the upload, the stored object is used.
+ */
 export async function completeRelease(env: Env, id: string, parts: z.infer<typeof completeSchema>["parts"]) {
   const { row, upload } = await uploading(env, id);
-  await upload.complete(parts);
+  await rootKey(env.ROOT_PRIVATE_KEY);
+  try {
+    await upload.complete(parts);
+  } catch (error) {
+    if (!(await env.PACKAGES.head(objectKey(row)))) throw new ApiError(409, "conflict", `R2 rechazó las partes: ${String(error)}`);
+  }
   const object = await env.PACKAGES.get(objectKey(row));
   if (!object) throw new ApiError(409, "conflict", "El paquete no quedó en R2");
   const digest = new crypto.DigestStream("SHA-512");
   await object.body.pipeTo(digest);
   const sha512 = toHex(new Uint8Array(await digest.digest));
-  const manifest = await signJws(await rootKey(env.ROOT_PRIVATE_KEY), "culinary-release+jws", {
-    v: 1,
+  const manifest = await signJws(env.ROOT_PRIVATE_KEY, "culinary-release+jws", {
     releaseId: row.id,
     version: row.version,
     platform: row.platform,
     filename: row.filename,
     bytes: object.size,
     sha512,
-    iat: new Date().toISOString(),
   });
   const ready = await env.DB.prepare("UPDATE release SET status = 'ready', upload_id = NULL, bytes = ?, sha512 = ?, manifest = ? WHERE id = ? RETURNING *")
     .bind(object.size, sha512, manifest, id)
@@ -101,10 +118,11 @@ export async function completeRelease(env: Env, id: string, parts: z.infer<typeo
   return releaseView(ready!);
 }
 
+/** Deletes the row first, so a release whose upload R2 already completed or expired cannot stay stuck. */
 export async function abortRelease(env: Env, id: string) {
-  const { upload } = await uploading(env, id);
-  await upload.abort();
+  const { row, upload } = await uploading(env, id);
   await env.DB.prepare("DELETE FROM release WHERE id = ?").bind(id).run();
+  await upload.abort().catch(() => env.PACKAGES.delete(objectKey(row)));
 }
 
 export async function listReleases(db: D1Database) {
@@ -142,7 +160,7 @@ export async function publish(db: D1Database, input: z.infer<typeof publicationS
   const id = crypto.randomUUID();
   await db.batch([
     db.prepare("INSERT INTO publication (id, release_id, target_all, created_at) VALUES (?, ?, ?, ?)").bind(id, release.id, input.target === "all" ? 1 : 0, new Date().toISOString()),
-    ...licenseIds.map((licenseId) => db.prepare("INSERT INTO publication_target (publication_id, license_id) VALUES (?, ?)").bind(id, licenseId)),
+    db.prepare("INSERT INTO publication_target (publication_id, license_id) SELECT ?, value FROM json_each(?)").bind(id, JSON.stringify(licenseIds)),
   ]);
   return publicationView((await db.prepare(`${PUBLICATION_SELECT} WHERE p.id = ?`).bind(id).first<PublicationRow>())!);
 }
@@ -153,7 +171,7 @@ export async function withdraw(db: D1Database, id: string) {
 }
 
 function versionKey(version: string): number[] {
-  const parts = /^(\d+)\.(\d+)\.(\d+)$/.exec(version);
+  const parts = VERSION_PATTERN.exec(version);
   return parts ? parts.slice(1).map(Number) : [0, 0, 0];
 }
 
@@ -172,14 +190,13 @@ export async function checkForUpdate(env: Env, license: LicenseRow, platform: st
   )
     .bind(platform, license.id)
     .all<ReleaseRow>();
-  const latest = results.filter((r) => newer(r.version, currentVersion)).sort((a, b) => (newer(a.version, b.version) ? -1 : 1))[0];
+  const latest = results.reduce<ReleaseRow | undefined>((best, r) => (newer(r.version, best?.version ?? currentVersion) ? r : best), undefined);
   if (!latest) return { update: null };
 
   const token = randomToken();
   const expires = Date.now() + DOWNLOAD_TTL_MS;
   await env.DB.prepare("INSERT INTO download_grant (token_hash, license_id, release_id, expires_at) VALUES (?, ?, ?, ?)").bind(await sha256Hex(token), license.id, latest.id, expires).run();
-  const update = await signJws(await rootKey(env.ROOT_PRIVATE_KEY), "culinary-update+jws", {
-    v: 1,
+  const update = await signJws(env.ROOT_PRIVATE_KEY, "culinary-update+jws", {
     licenseId: license.id,
     siteId: license.site_id,
     releaseId: latest.id,
@@ -189,7 +206,6 @@ export async function checkForUpdate(env: Env, license: LicenseRow, platform: st
     bytes: latest.bytes,
     sha512: latest.sha512,
     notes: latest.notes,
-    iat: new Date().toISOString(),
     exp: new Date(expires).toISOString(),
   });
   return { update, release: latest.manifest, download: { path: `/branch/v1/downloads/${latest.id}`, token, expiresAt: new Date(expires).toISOString() } };
@@ -197,20 +213,25 @@ export async function checkForUpdate(env: Env, license: LicenseRow, platform: st
 
 /** Downloads use a one-hour bearer grant instead of a signature so that resumed Range requests need no new challenge. */
 export async function streamDownload(c: Ctx, releaseId: string): Promise<Response> {
-  const auth = c.req.header("authorization") ?? "";
-  if (!auth.startsWith("Bearer ")) throw new ApiError(401, "unauthorized", "Permiso de descarga requerido");
+  const tokenHash = await bearerHash(c, "Permiso de descarga requerido");
   const grant = await c.env.DB.prepare(
     `SELECT l.*, r.filename AS release_filename FROM download_grant g JOIN license l ON l.id = g.license_id JOIN release r ON r.id = g.release_id
      WHERE g.token_hash = ? AND g.release_id = ? AND g.expires_at > ?`,
   )
-    .bind(await sha256Hex(auth.slice(7)), releaseId, Date.now())
+    .bind(tokenHash, releaseId, Date.now())
     .first<LicenseRow & { release_filename: string }>();
   if (!grant || licenseStatus(grant) === "revoked") throw new ApiError(401, "unauthorized", "Permiso de descarga inválido o vencido");
 
-  const object = await c.env.PACKAGES.get(objectKey({ id: releaseId, filename: grant.release_filename }), { range: c.req.raw.headers });
+  const object = await c.env.PACKAGES.get(objectKey({ id: releaseId, filename: grant.release_filename }), { range: c.req.raw.headers }).catch(() => {
+    throw new ApiError(416, "range_not_satisfiable", "Rango inválido; pide un solo rango dentro del archivo");
+  });
   if (!object) throw new ApiError(404, "not_found", "Paquete no disponible");
-  const headers = new Headers({ "content-type": "application/octet-stream", "accept-ranges": "bytes", etag: object.httpEtag, "cache-control": "no-store" });
-  headers.set("content-disposition", `attachment; filename="${grant.release_filename}"`);
+  const headers = new Headers({
+    "content-type": "application/octet-stream",
+    "content-disposition": `attachment; filename="${grant.release_filename}"`,
+    "accept-ranges": "bytes",
+    etag: object.httpEtag,
+  });
   if (object.range && c.req.header("range")) {
     const r = object.range as { offset?: number; length?: number; suffix?: number };
     const offset = r.suffix !== undefined ? object.size - r.suffix : (r.offset ?? 0);

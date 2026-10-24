@@ -1,7 +1,10 @@
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import { totpCode } from "../src/crypto";
-import { call, challenge, enrollAdmin, firstAdmin, json, newDevice, signed, step } from "./helpers";
+import { call, challenge, enrollAdmin, firstAdmin, json, newDevice, PASSWORD, signed, signedAdmin, step } from "./helpers";
+
+const login = (session: Awaited<ReturnType<typeof firstAdmin>>, password: string, totp: string, nonce?: string) =>
+  signed("admin", session.device, session.username, "POST", "/admin/v1/login", { body: { password, totp }, nonce });
 
 describe("panel de administrador", () => {
   it("da de alta al primer administrador con el código inicial y abre sesión con tres factores", async () => {
@@ -19,9 +22,19 @@ describe("panel de administrador", () => {
     expect((await json(response, 403)).error.code).toBe("forbidden");
   });
 
-  it("agrega administradores solo con invitación de un administrador en sesión", async () => {
+  it("no revela si un usuario existe a quien no tiene código de alta", async () => {
+    await firstAdmin();
+    const device = await newDevice();
+    const response = await call("POST", "/admin/v1/enroll", {
+      body: { code: "INVENTADO-INVENTADO-123", username: "proveedor", password: "otra contraseña larga", deviceName: "x", key: { alg: device.alg, spki: device.spki } },
+    });
+    expect((await json(response, 403)).error.code).toBe("forbidden");
+  });
+
+  it("agrega administradores solo con invitación firmada por un administrador en sesión", async () => {
     const owner = await firstAdmin();
-    const invite = await json(await call("POST", "/admin/v1/invites", { token: owner.token }), 201);
+    expect((await call("POST", "/admin/v1/invites", { token: owner.token })).status).toBe(401);
+    const invite = await json(await signedAdmin(owner, "POST", "/admin/v1/invites"), 201);
     const second = await enrollAdmin(invite.code, "soporte");
     const admins = await json(await call("GET", "/admin/v1/admins", { token: second.token }), 200);
     expect(admins.admins.map((a: any) => a.username)).toEqual(["proveedor", "soporte"]);
@@ -31,34 +44,54 @@ describe("panel de administrador", () => {
     expect(reused.status).toBe(403);
   });
 
+  it("borrar un administrador pide la firma del dispositivo, no solo la sesión", async () => {
+    const owner = await firstAdmin();
+    const invite = await json(await signedAdmin(owner, "POST", "/admin/v1/invites"), 201);
+    const second = await enrollAdmin(invite.code, "soporte");
+    const { admins } = await json(await call("GET", "/admin/v1/admins", { token: owner.token }), 200);
+    const ownerId = admins.find((a: any) => a.username === "proveedor").id;
+    expect((await call("DELETE", `/admin/v1/admins/${ownerId}`, { token: second.token })).status).toBe(401);
+    await json(await signedAdmin(second, "DELETE", `/admin/v1/admins/${ownerId}`), 200);
+  });
+
   it("rechaza la contraseña correcta firmada por otro dispositivo", async () => {
     const session = await firstAdmin();
     const stranger = await newDevice();
-    const response = await signed("admin", stranger, session.username, "POST", "/admin/v1/login", { password: "contraseña muy larga 123", totp: await totpCode(session.totpSecret, step() + 1) });
+    const response = await signed("admin", stranger, session.username, "POST", "/admin/v1/login", { body: { password: PASSWORD, totp: await totpCode(session.totpSecret, step() + 1) } });
     expect(response.status).toBe(401);
   });
 
   it("no deja reutilizar un código TOTP ni un reto ya usado", async () => {
     const session = await firstAdmin();
-    const replayedTotp = await signed("admin", session.device, session.username, "POST", "/admin/v1/login", {
-      password: "contraseña muy larga 123",
-      totp: await totpCode(session.totpSecret, step() + 1),
-    });
-    expect(replayedTotp.status).toBe(401);
+    expect((await login(session, PASSWORD, await totpCode(session.totpSecret, step() + 1))).status).toBe(401);
 
     const nonce = await challenge("admin", session.username);
-    await signed("admin", session.device, session.username, "POST", "/admin/v1/login", { password: "mal", totp: "000000" }, nonce);
-    const replayedNonce = await signed("admin", session.device, session.username, "POST", "/admin/v1/login", { password: "mal", totp: "000000" }, nonce);
-    expect(replayedNonce.status).toBe(401);
+    await login(session, "mal", "000000", nonce);
+    expect((await login(session, "mal", "000000", nonce)).status).toBe(401);
+  });
+
+  it("un reto de una ruta o de otro sujeto no sirve", async () => {
+    const session = await firstAdmin();
+    const foreign = await challenge("admin", "otro-usuario");
+    expect((await login(session, PASSWORD, "000000", foreign)).status).toBe(401);
+    const branchNonce = await challenge("branch", session.username);
+    expect((await login(session, PASSWORD, "000000", branchNonce)).status).toBe(401);
+  });
+
+  it("pedir muchos retos de un usuario no bloquea su alta ni su inicio de sesión", async () => {
+    const device = await newDevice();
+    const body = { code: env.ADMIN_SETUP_CODE, username: "proveedor", password: PASSWORD, deviceName: "x", key: { alg: device.alg, spki: device.spki } };
+    const { totp } = await json(await call("POST", "/admin/v1/enroll", { body }), 201);
+    for (let i = 0; i < 30; i++) await challenge("admin", "proveedor");
+    await json(await signed("admin", device, "proveedor", "POST", "/admin/v1/enroll/confirm", { body: { totp: await totpCode(totp.secret, step()) } }), 200);
+    for (let i = 0; i < 30; i++) await challenge("admin", "proveedor");
+    await json(await signed("admin", device, "proveedor", "POST", "/admin/v1/login", { body: { password: PASSWORD, totp: await totpCode(totp.secret, step() + 1) } }), 200);
   });
 
   it("bloquea la cuenta tras cinco intentos fallidos con el dispositivo correcto", async () => {
     const session = await firstAdmin();
-    for (let i = 0; i < 5; i++) {
-      const response = await signed("admin", session.device, session.username, "POST", "/admin/v1/login", { password: "contraseña equivocada", totp: "123456" });
-      expect(response.status).toBe(401);
-    }
-    const locked = await signed("admin", session.device, session.username, "POST", "/admin/v1/login", { password: "contraseña muy larga 123", totp: await totpCode(session.totpSecret, step() + 1) });
+    for (let i = 0; i < 5; i++) expect((await login(session, "contraseña equivocada", "123456")).status).toBe(401);
+    const locked = await login(session, PASSWORD, await totpCode(session.totpSecret, step() + 1));
     expect((await json(locked, 429)).error.code).toBe("rate_limited");
   });
 
@@ -74,6 +107,13 @@ describe("panel de administrador", () => {
     expect(root.spki).toBe(env.ROOT_PUBLIC_SPKI);
     expect(root.pem).toContain("BEGIN PUBLIC KEY");
   });
+
+  it("registra en la auditoría las acciones del panel", async () => {
+    const session = await firstAdmin();
+    const { entries } = await json(await call("GET", "/admin/v1/audit", { token: session.token }), 200);
+    expect(entries.map((e: any) => e.action)).toEqual(["admin.login", "admin.confirm", "admin.enroll"]);
+    expect((await call("GET", "/admin/v1/audit?before=abc", { token: session.token })).status).toBe(400);
+  });
 });
 
 describe("cualquier otro uso", () => {
@@ -83,7 +123,7 @@ describe("cualquier otro uso", () => {
   });
 
   it("pide sesión en todas las rutas privadas del panel", async () => {
-    for (const path of ["/admin/v1/licenses", "/admin/v1/tickets", "/admin/v1/registry", "/admin/v1/releases"]) {
+    for (const path of ["/admin/v1/licenses", "/admin/v1/tickets", "/admin/v1/registry", "/admin/v1/releases", "/admin/v1/admins"]) {
       expect((await call("GET", path)).status).toBe(401);
     }
   });

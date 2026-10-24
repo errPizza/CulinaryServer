@@ -26,13 +26,11 @@ CREATE TABLE license (
 );
 CREATE INDEX license_tenant ON license (tenant_id);
 
-CREATE TABLE challenge (
+-- Short-lived security rows store expiry as INTEGER milliseconds; business rows use ISO 8601 TEXT.
+CREATE TABLE used_challenge (
   nonce TEXT PRIMARY KEY,
-  scope TEXT NOT NULL,
-  subject TEXT NOT NULL,
   expires_at INTEGER NOT NULL
 );
-CREATE INDEX challenge_subject ON challenge (scope, subject);
 
 CREATE TABLE admin (
   id TEXT PRIMARY KEY,

@@ -3,7 +3,7 @@
   // Debe coincidir con el nombre del Worker en el panel de Cloudflare (integración Git).
   "name": "culinary-server",
   "main": "src/index.ts",
-  "compatibility_date": "2026-10-20",
+  "compatibility_date": "2026-10-19",
   "workers_dev": true,
   // Las URL de vista previa ejecutarían ramas sin revisar contra la base y los secretos de producción.
   "preview_urls": false,

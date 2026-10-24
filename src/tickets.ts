@@ -3,7 +3,9 @@ import { ApiError } from "./http";
 const MAX_OPEN_TICKETS = 20;
 const MAX_MESSAGES = 100;
 
-type TicketRow = { id: string; license_id: string; subject: string; status: "open" | "answered" | "closed"; created_at: string; updated_at: string };
+export const TICKET_STATUSES = ["open", "answered", "closed"] as const;
+
+type TicketRow = { id: string; license_id: string; subject: string; status: (typeof TICKET_STATUSES)[number]; created_at: string; updated_at: string };
 type MessageRow = { id: string; ticket_id: string; author: "branch" | "admin"; admin_id: string | null; body: string; created_at: string };
 
 export type Author = { kind: "branch"; licenseId: string } | { kind: "admin"; adminId: string };

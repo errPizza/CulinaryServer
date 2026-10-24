@@ -1,11 +1,13 @@
 import { env } from "cloudflare:workers";
-import { beforeEach } from "vitest";
+import { beforeEach, expect } from "vitest";
 import { migrate } from "../src/db";
 
-// Storage is shared by the tests of one file, so each test starts from empty tables.
-const TABLES = ["ticket_message", "ticket", "download_grant", "publication_target", "publication", "release", "audit", "admin_session", "admin_invite", "admin", "challenge", "license"];
+// Storage is shared by the tests of one file, so each test starts from empty tables (children first).
+const TABLES = ["ticket_message", "ticket", "download_grant", "publication_target", "publication", "release", "audit", "admin_session", "admin_invite", "admin", "used_challenge", "license"];
 
 beforeEach(async () => {
   await migrate(env.DB);
+  const { results } = await env.DB.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT IN ('d1_migrations', '_cf_KV', '_cf_METADATA')").all<{ name: string }>();
+  expect(results.map((t) => t.name).sort(), "TABLES debe cubrir todo el esquema").toEqual([...TABLES].sort());
   await env.DB.batch(TABLES.map((t) => env.DB.prepare(`DELETE FROM ${t}`)));
 });

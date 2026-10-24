@@ -1,10 +1,13 @@
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
-import { termEnd } from "../src/catalog";
-import { activate, call, challenge, createLicense, firstAdmin, fingerprint, json, newDevice, signed, verifyJws } from "./helpers";
+import { DAY_MS, termEnd } from "../src/catalog";
+import { nextExpiry, type LicenseRow } from "../src/licenses";
+import { activate, activatedBranch, call, challenge, createLicense, firstAdmin, fingerprint, json, newDevice, signed, verifyJws, type Device } from "./helpers";
 
-const renew = (device: Awaited<ReturnType<typeof newDevice>>, licenseId: string, body: unknown = { fingerprint }) =>
-  signed("branch", device, licenseId, "POST", "/branch/v1/license/renew", body);
+const renew = (device: Device, licenseId: string, body: unknown = { fingerprint }, nonce?: string) =>
+  signed("branch", device, licenseId, "POST", "/branch/v1/license/renew", { body, nonce });
+
+const expire = (licenseId: string) => env.DB.prepare("UPDATE license SET expires_at = ? WHERE id = ?").bind(new Date(Date.now() - 1000).toISOString(), licenseId).run();
 
 describe("activación", () => {
   it("liga la licencia a la llave del equipo y entrega la licencia firmada por la raíz", async () => {
@@ -14,6 +17,7 @@ describe("activación", () => {
     const { license: jws } = await json(await activate(license.id, activationCode, device), 200);
     const payload = await verifyJws(jws, "culinary-license+jws");
     expect(payload).toMatchObject({
+      v: 1,
       licenseId: license.id,
       siteId: license.siteId,
       plan: "monthly",
@@ -23,13 +27,14 @@ describe("activación", () => {
       key: { alg: "Ed25519", spki: device.spki },
       binding: "fingerprint",
     });
-    expect(Date.parse(payload.offlineUntil) - Date.parse(payload.validatedAt)).toBe(3 * 24 * 60 * 60 * 1000);
+    expect(Date.parse(payload.offlineUntil) - Date.parse(payload.validatedAt)).toBe(3 * DAY_MS);
     expect(payload.expiresAt).toBe(termEnd("monthly", null, new Date(payload.activatedAt))!.toISOString());
   });
 
-  it("acepta la llave ES256 de un TPM", async () => {
+  it("acepta la llave ES256 de un TPM y rechaza una Ed25519 declarada como TPM", async () => {
     const { token } = await firstAdmin();
     const { license, activationCode } = await createLicense(token);
+    expect((await activate(license.id, activationCode, await newDevice("Ed25519"), { kind: "tpm" })).status).toBe(400);
     const tpm = await newDevice("ES256");
     const { license: jws } = await json(await activate(license.id, activationCode, tpm, { kind: "tpm" }), 200);
     expect((await verifyJws(jws, "culinary-license+jws")).binding).toBe("tpm");
@@ -51,12 +56,21 @@ describe("activación", () => {
     await json(await activate(license.id, activationCode.toLowerCase().replace(/-/g, " "), await newDevice()), 200);
   });
 
+  it("una activación rechazada por vencimiento no gasta el código", async () => {
+    const { token } = await firstAdmin();
+    const { license, activationCode } = await createLicense(token);
+    await expire(license.id);
+    expect((await json(await activate(license.id, activationCode, await newDevice()), 403)).error.code).toBe("license_expired");
+    const row = await env.DB.prepare("SELECT activation_code_hash, key_spki FROM license WHERE id = ?").bind(license.id).first<Pick<LicenseRow, "activation_code_hash" | "key_spki">>();
+    expect(row).toEqual({ activation_code_hash: expect.any(String), key_spki: null });
+  });
+
   it("el plazo de prueba empieza al activar con los días elegidos en el panel", async () => {
     const { token } = await firstAdmin();
     const { license, activationCode } = await createLicense(token, { plan: "trial", trialDays: 14 });
     expect(license.expiresAt).toBeNull();
     const payload = await verifyJws((await json(await activate(license.id, activationCode, await newDevice()), 200)).license, "culinary-license+jws");
-    expect(Date.parse(payload.expiresAt) - Date.parse(payload.activatedAt)).toBe(14 * 24 * 60 * 60 * 1000);
+    expect(Date.parse(payload.expiresAt) - Date.parse(payload.activatedAt)).toBe(14 * DAY_MS);
   });
 
   it("la licencia permanente no tiene vencimiento", async () => {
@@ -70,10 +84,7 @@ describe("activación", () => {
 describe("renovación", () => {
   async function activated() {
     const { token } = await firstAdmin();
-    const { license, activationCode } = await createLicense(token);
-    const device = await newDevice();
-    await json(await activate(license.id, activationCode, device), 200);
-    return { token, license, device };
+    return { token, ...(await activatedBranch(token)) };
   }
 
   it("renueva con la firma del equipo ligado y tolera un componente de hardware cambiado", async () => {
@@ -92,20 +103,27 @@ describe("renovación", () => {
   it("no acepta un reto dos veces ni un reto de otra licencia", async () => {
     const { token, license, device } = await activated();
     const nonce = await challenge("branch", license.id);
-    await json(await signed("branch", device, license.id, "POST", "/branch/v1/license/renew", { fingerprint }, nonce), 200);
-    expect((await signed("branch", device, license.id, "POST", "/branch/v1/license/renew", { fingerprint }, nonce)).status).toBe(401);
+    await json(await renew(device, license.id, { fingerprint }, nonce), 200);
+    expect((await renew(device, license.id, { fingerprint }, nonce)).status).toBe(401);
 
     const other = await createLicense(token);
     const foreign = await challenge("branch", other.license.id);
-    expect((await signed("branch", device, license.id, "POST", "/branch/v1/license/renew", { fingerprint }, foreign)).status).toBe(401);
+    expect((await renew(device, license.id, { fingerprint }, foreign)).status).toBe(401);
   });
 
-  it("una licencia vencida no se renueva y recibe el aviso firmado para la pantalla de bloqueo", async () => {
+  it("pedir muchos retos de una licencia no impide renovarla", async () => {
+    const { license, device } = await activated();
+    for (let i = 0; i < 30; i++) await challenge("branch", license.id);
+    await json(await renew(device, license.id), 200);
+  });
+
+  it("una licencia vencida no se renueva y recibe el aviso firmado, ligado a su reto, para la pantalla de bloqueo", async () => {
     const { token, license, device } = await activated();
-    await env.DB.prepare("UPDATE license SET expires_at = ? WHERE id = ?").bind(new Date(Date.now() - 1000).toISOString(), license.id).run();
-    const error = (await json(await renew(device, license.id), 403)).error;
+    await expire(license.id);
+    const nonce = await challenge("branch", license.id);
+    const error = (await json(await renew(device, license.id, { fingerprint }, nonce), 403)).error;
     expect(error.code).toBe("license_expired");
-    expect(await verifyJws(error.notice, "culinary-license-status+jws")).toMatchObject({ licenseId: license.id, status: "expired", plan: "monthly" });
+    expect(await verifyJws(error.notice, "culinary-license-status+jws")).toMatchObject({ licenseId: license.id, status: "expired", plan: "monthly", challenge: nonce, revision: 2 });
 
     const renewed = await json(await call("POST", `/admin/v1/licenses/${license.id}/renew`, { token, body: {} }), 200);
     expect(renewed.license.status).toBe("active");
@@ -135,10 +153,12 @@ describe("edición desde el panel", () => {
     expect(next.limits).toEqual({ maxUsers: 40, maxTables: 80 });
   });
 
-  it("rechaza funciones que Culinary Restaurant no conoce", async () => {
+  it("rechaza funciones desconocidas y días de prueba fuera del plan de prueba", async () => {
     const { token } = await firstAdmin();
     const { license } = await createLicense(token);
     expect((await call("PATCH", `/admin/v1/licenses/${license.id}`, { token, body: { features: ["teletransporte"] } })).status).toBe(400);
+    expect((await call("PATCH", `/admin/v1/licenses/${license.id}`, { token, body: { trialDays: 10 } })).status).toBe(400);
+    expect((await call("GET", "/admin/v1/licenses?status=perdida", { token })).status).toBe(400);
   });
 
   it("renovar suma un periodo desde el vencimiento vigente", async () => {
@@ -164,8 +184,9 @@ describe("edición desde el panel", () => {
   it("no repite siteId y valida los días de prueba", async () => {
     const { token } = await firstAdmin();
     const { license } = await createLicense(token);
-    expect((await call("POST", "/admin/v1/licenses", { token, body: { customer: "x", branchName: "y", siteId: license.siteId, plan: "monthly", features: [], limits: { maxUsers: 1, maxTables: 1 } } })).status).toBe(409);
-    expect((await call("POST", "/admin/v1/licenses", { token, body: { customer: "x", branchName: "y", siteId: "otra", plan: "trial", features: [], limits: { maxUsers: 1, maxTables: 1 } } })).status).toBe(400);
+    const base = { customer: "x", branchName: "y", plan: "monthly", features: [], limits: { maxUsers: 1, maxTables: 1 } };
+    expect((await json(await call("POST", "/admin/v1/licenses", { token, body: { ...base, siteId: license.siteId } }), 409)).error.code).toBe("conflict");
+    expect((await call("POST", "/admin/v1/licenses", { token, body: { ...base, siteId: "otra", plan: "trial" } })).status).toBe(400);
   });
 });
 
@@ -173,5 +194,15 @@ describe("plazos", () => {
   it("el mes se ajusta al último día del mes siguiente", () => {
     expect(termEnd("monthly", null, new Date("2026-01-31T10:00:00Z"))!.toISOString()).toBe("2026-02-28T10:00:00.000Z");
     expect(termEnd("annual", null, new Date("2028-02-29T00:00:00Z"))!.toISOString()).toBe("2029-02-28T00:00:00.000Z");
+  });
+
+  it("al editar, la fecha explícita gana y el cambio de plan reinicia el plazo solo si ya se activó", () => {
+    const at = new Date("2026-05-10T00:00:00Z");
+    const row = { plan: "monthly", activated_at: "2026-01-01T00:00:00.000Z", expires_at: "2026-06-01T00:00:00.000Z" } as LicenseRow;
+    expect(nextExpiry(row, "permanent", null, { plan: "permanent" }, at)).toBeNull();
+    expect(nextExpiry(row, "monthly", null, { expiresAt: "2027-01-01T00:00:00Z" }, at)).toBe("2027-01-01T00:00:00.000Z");
+    expect(nextExpiry(row, "annual", null, { plan: "annual" }, at)).toBe("2027-05-10T00:00:00.000Z");
+    expect(nextExpiry({ ...row, activated_at: null, expires_at: null }, "annual", null, { plan: "annual" }, at)).toBeNull();
+    expect(nextExpiry(row, "monthly", null, {}, at)).toBe(row.expires_at);
   });
 });

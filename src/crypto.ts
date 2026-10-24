@@ -1,8 +1,18 @@
+import { z } from "zod";
 import { ApiError } from "./http";
 
 const encoder = new TextEncoder();
 
-export type KeyAlg = "Ed25519" | "ES256";
+export const KEY_ALGS = ["Ed25519", "ES256"] as const;
+export type KeyAlg = (typeof KEY_ALGS)[number];
+
+/** WebCrypto parameters per algorithm: `key` to import or generate, `sign` to sign or verify. */
+export const KEY_PARAMS = {
+  Ed25519: { key: { name: "Ed25519" }, sign: { name: "Ed25519" } },
+  ES256: { key: { name: "ECDSA", namedCurve: "P-256" }, sign: { name: "ECDSA", hash: "SHA-256" } },
+} as const;
+
+export const publicKeySchema = z.strictObject({ alg: z.enum(KEY_ALGS), spki: z.string().min(40).max(200) });
 
 export function utf8(text: string): Uint8Array<ArrayBuffer> {
   return encoder.encode(text) as Uint8Array<ArrayBuffer>;
@@ -80,12 +90,14 @@ function fromBase32(text: string): Uint8Array<ArrayBuffer> {
 }
 
 /** Codes people type at a till: 20 base32 characters (100 bits) in groups of five. */
-export function newHumanCode(): string {
-  return base32(randomBytes(13)).slice(0, 20).match(/.{5}/g)!.join("-");
+export async function issueHumanCode(): Promise<{ code: string; hash: string }> {
+  const code = base32(randomBytes(13)).slice(0, 20).match(/.{5}/g)!.join("-");
+  return { code, hash: await hashHumanCode(code) };
 }
 
-export function normalizeHumanCode(code: string): string {
-  return code.toUpperCase().replace(/[\s-]/g, "");
+/** Case, spaces and dashes do not matter when the code is typed back. */
+export function hashHumanCode(code: string): Promise<string> {
+  return sha256Hex(code.toUpperCase().replace(/[\s-]/g, ""));
 }
 
 export async function sameSecret(a: string, b: string): Promise<boolean> {
@@ -93,9 +105,8 @@ export async function sameSecret(a: string, b: string): Promise<boolean> {
 }
 
 export async function importPublicKey(alg: KeyAlg, spki: string): Promise<CryptoKey> {
-  const params = alg === "Ed25519" ? { name: "Ed25519" } : { name: "ECDSA", namedCurve: "P-256" };
   try {
-    return await crypto.subtle.importKey("spki", fromBase64Url(spki), params, false, ["verify"]);
+    return await crypto.subtle.importKey("spki", fromBase64Url(spki), KEY_PARAMS[alg].key, false, ["verify"]);
   } catch {
     throw new ApiError(400, "bad_request", `Llave pública ${alg} inválida`);
   }
@@ -104,8 +115,7 @@ export async function importPublicKey(alg: KeyAlg, spki: string): Promise<Crypto
 /** ES256 signatures are IEEE P1363 (r || s, 64 bytes), not DER. */
 export async function verifySignature(alg: KeyAlg, key: CryptoKey, signature: Uint8Array<ArrayBuffer>, data: Uint8Array<ArrayBuffer>): Promise<boolean> {
   if (signature.length !== 64) return false;
-  const params = alg === "Ed25519" ? { name: "Ed25519" } : { name: "ECDSA", hash: "SHA-256" };
-  return crypto.subtle.verify(params, key, signature, data);
+  return crypto.subtle.verify(KEY_PARAMS[alg].sign, key, signature, data);
 }
 
 export type RootKey = { privateKey: CryptoKey; publicRaw: Uint8Array<ArrayBuffer>; kid: string };
@@ -113,9 +123,14 @@ export type RootKey = { privateKey: CryptoKey; publicRaw: Uint8Array<ArrayBuffer
 let rootCache: { secret: string; key: Promise<RootKey> } | undefined;
 
 /** Accepts the PKCS#8 key as PEM, base64 or base64url (what scripts/generate-secrets.mjs prints). */
-export function rootKey(secret: string | undefined): Promise<RootKey> {
+export async function rootKey(secret: string | undefined): Promise<RootKey> {
   if (!secret) throw new ApiError(503, "server_misconfigured", "Falta el secreto ROOT_PRIVATE_KEY");
-  if (rootCache?.secret !== secret) rootCache = { secret, key: loadRootKey(secret) };
+  if (rootCache?.secret !== secret) {
+    const key = loadRootKey(secret).catch(() => {
+      throw new ApiError(503, "server_misconfigured", "ROOT_PRIVATE_KEY no es una llave Ed25519 PKCS#8");
+    });
+    rootCache = { secret, key };
+  }
   return rootCache.key;
 }
 
@@ -133,10 +148,14 @@ export function ed25519Spki(raw: Uint8Array): Uint8Array<ArrayBuffer> {
   return new Uint8Array([...prefix, ...raw]);
 }
 
-/** Compact JWS (RFC 7515) with EdDSA (RFC 8037). `typ` tells documents apart so one cannot pass for another. */
-export async function signJws(root: RootKey, typ: string, payload: unknown): Promise<string> {
+/**
+ * Compact JWS (RFC 7515) with EdDSA (RFC 8037). `typ` tells documents apart so one cannot pass for another.
+ * Every payload starts with `v: 1` and ends with `iat`.
+ */
+export async function signJws(secret: string | undefined, typ: string, payload: Record<string, unknown>): Promise<string> {
+  const root = await rootKey(secret);
   const header = toBase64Url(utf8(JSON.stringify({ alg: "EdDSA", typ, kid: root.kid })));
-  const body = toBase64Url(utf8(JSON.stringify(payload)));
+  const body = toBase64Url(utf8(JSON.stringify({ v: 1, ...payload, iat: new Date().toISOString() })));
   const signature = await crypto.subtle.sign({ name: "Ed25519" }, root.privateKey, utf8(`${header}.${body}`));
   return `${header}.${body}.${toBase64Url(new Uint8Array(signature))}`;
 }
