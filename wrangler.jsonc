@@ -1,0 +1,20 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  // Debe coincidir con el nombre del Worker en el panel de Cloudflare (integración Git).
+  "name": "culinary-server",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-20",
+  "workers_dev": true,
+  // Las URL de vista previa ejecutarían ramas sin revisar contra la base y los secretos de producción.
+  "preview_urls": false,
+  "observability": { "enabled": true },
+  // Sin IDs: Wrangler crea la base D1 y el bucket R2 en el primer despliegue.
+  "d1_databases": [{ "binding": "DB", "database_name": "culinary-server" }],
+  "r2_buckets": [{ "binding": "PACKAGES" }],
+  "rules": [{ "type": "Text", "globs": ["**/*.sql"], "fallthrough": true }],
+  "triggers": { "crons": ["17 4 * * *"] },
+  "vars": {
+    // Orígenes del panel separados por comas, por ejemplo "https://admin.ejemplo.com,http://tauri.localhost".
+    "ADMIN_ORIGINS": ""
+  }
+}
