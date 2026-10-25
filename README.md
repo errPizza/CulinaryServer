@@ -36,7 +36,7 @@ Lo que no se puede hacer desde el repositorio está marcado con **(tú)**.
 2. **(tú) Conecta el repositorio en Cloudflare:** Workers & Pages → Create → elige GitHub → repositorio `CulinaryServer`.
    - El nombre del Worker debe ser `culinary-server`, igual que `name` en `wrangler.jsonc`. Si no coincide, la compilación falla.
    - Deja vacío el comando de compilación y el de despliegue en `npx wrangler deploy`.
-   - Save and Deploy. El primer despliegue crea la base D1 `culinary-server` y el bucket R2 con el prefijo del Worker.
+   - Save and Deploy. El primer despliegue crea la base D1 `culinary-server` y el bucket R2 `culinary-server-packages`. R2 debe estar activado en la cuenta (Dashboard → R2, una sola vez); si no, el despliegue falla al crear el bucket.
 
 3. **(tú) Agrega los secretos:** el Worker → Settings → Variables and Secrets → Add, tipo **Secret**:
    - `ROOT_PRIVATE_KEY`: el contenido de `secrets/root-private.txt`.

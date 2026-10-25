@@ -8,9 +8,10 @@
   // Las URL de vista previa ejecutarían ramas sin revisar contra la base y los secretos de producción.
   "preview_urls": false,
   "observability": { "enabled": true },
-  // Sin IDs: Wrangler crea la base D1 y el bucket R2 en el primer despliegue.
+  // Sin IDs: Wrangler crea la base D1 y el bucket R2 con estos nombres en el primer despliegue.
+  // El bucket necesita nombre: sin él, un despliegue desde Git intenta heredarlo de una versión anterior que no lo tiene.
   "d1_databases": [{ "binding": "DB", "database_name": "culinary-server" }],
-  "r2_buckets": [{ "binding": "PACKAGES" }],
+  "r2_buckets": [{ "binding": "PACKAGES", "bucket_name": "culinary-server-packages" }],
   "rules": [{ "type": "Text", "globs": ["**/*.sql"], "fallthrough": true }],
   "triggers": { "crons": ["17 4 * * *"] },
   "vars": {
