@@ -1,4 +1,4 @@
-import { OFFLINE_GRACE_MS, termEnd, type Limits, type Plan } from "./catalog";
+import { OFFLINE_GRACE_MS, termEnd, TIER_TERMINALS, type Limits, type Plan, type Tier } from "./catalog";
 import { signJws, type KeyAlg } from "./crypto";
 import { ApiError, type Env } from "./http";
 
@@ -10,6 +10,8 @@ export type LicenseRow = {
   customer: string;
   branch_name: string;
   plan: Plan;
+  tier: Tier;
+  addons: string;
   trial_days: number | null;
   features: string;
   limits: string;
@@ -44,7 +46,14 @@ export function licenseStatus(row: LicenseRow, at = Date.now()): LicenseStatus {
 }
 
 export const features = (row: LicenseRow) => JSON.parse(row.features) as string[];
-export const limits = (row: LicenseRow) => JSON.parse(row.limits) as Limits;
+export const addons = (row: LicenseRow) => JSON.parse(row.addons) as string[];
+// maxTerminals left unset follows the tier, so moving Lite to Pro raises it without editing limits.
+export function limits(row: LicenseRow): Required<Limits> {
+
+  const stored = JSON.parse(row.limits) as Limits;
+
+  return { ...stored, maxTerminals: stored.maxTerminals ?? TIER_TERMINALS[row.tier] };
+}
 
 export async function findLicense(db: D1Database, id: string): Promise<LicenseRow | null> {
   
@@ -79,6 +88,8 @@ export function licenseView(row: LicenseRow) {
     customer: row.customer,
     branchName: row.branch_name,
     plan: row.plan,
+    tier: row.tier,
+    addons: addons(row),
     trialDays: row.trial_days,
     features: features(row),
     limits: limits(row),
@@ -111,6 +122,8 @@ export async function licenseToken(env: Env, row: LicenseRow): Promise<string> {
     customer: row.customer,
     branchName: row.branch_name,
     plan: row.plan,
+    tier: row.tier,
+    addons: addons(row),
     status: "active",
     features: features(row),
     limits: limits(row),
@@ -133,6 +146,8 @@ export async function statusNotice(env: Env, row: LicenseRow, challenge: string)
     siteId: row.site_id,
     status: licenseStatus(row),
     plan: row.plan,
+    tier: row.tier,
+    addons: addons(row),
     expiresAt: row.expires_at,
     revokedAt: row.revoked_at,
     challenge

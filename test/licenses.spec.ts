@@ -21,9 +21,11 @@ describe("activación", () => {
       licenseId: license.id,
       siteId: license.siteId,
       plan: "monthly",
+      tier: "lite",
+      addons: [],
       status: "active",
       features: ["printing", "reservations"],
-      limits: { maxUsers: 15, maxTables: 30 },
+      limits: { maxUsers: 15, maxTables: 30, maxTerminals: 2 },
       key: { alg: "Ed25519", spki: device.spki },
       binding: "fingerprint",
     });
@@ -150,7 +152,22 @@ describe("edición desde el panel", () => {
     const next = await verifyJws((await json(await renew(device, license.id), 200)).license, "culinary-license+jws");
     expect(next.revision).toBeGreaterThan(first.revision);
     expect(next.features).toEqual(["multiBranch", "printing"]);
-    expect(next.limits).toEqual({ maxUsers: 40, maxTables: 80 });
+    expect(next.limits).toEqual({ maxUsers: 40, maxTables: 80, maxTerminals: 2 });
+  });
+
+  it("pasar de Lite a Pro con add-ons llega firmado y sube las terminales del nivel", async () => {
+    const { token } = await firstAdmin();
+    const { license, activationCode } = await createLicense(token, { addons: ["mobileOrdering"] });
+    expect(license).toMatchObject({ tier: "lite", addons: ["mobileOrdering"], limits: { maxTerminals: 2 } });
+    const device = await newDevice();
+    await json(await activate(license.id, activationCode, device), 200);
+    await json(await call("PATCH", `/admin/v1/licenses/${license.id}`, { token, body: { tier: "pro", addons: ["webOrdering", "deliveryHub", "webOrdering"] } }), 200);
+    const pro = await verifyJws((await json(await renew(device, license.id), 200)).license, "culinary-license+jws");
+    expect(pro).toMatchObject({ tier: "pro", addons: ["deliveryHub", "webOrdering"], limits: { maxTerminals: 10 } });
+    await json(await call("PATCH", `/admin/v1/licenses/${license.id}`, { token, body: { limits: { maxUsers: 15, maxTables: 30, maxTerminals: 4 } } }), 200);
+    expect((await verifyJws((await json(await renew(device, license.id), 200)).license, "culinary-license+jws")).limits.maxTerminals).toBe(4);
+    expect((await call("PATCH", `/admin/v1/licenses/${license.id}`, { token, body: { tier: "gold" } })).status).toBe(400);
+    expect((await call("PATCH", `/admin/v1/licenses/${license.id}`, { token, body: { addons: ["timbres"] } })).status).toBe(400);
   });
 
   it("rechaza funciones desconocidas y días de prueba fuera del plan de prueba", async () => {
@@ -184,7 +201,7 @@ describe("edición desde el panel", () => {
   it("no repite siteId y valida los días de prueba", async () => {
     const { token } = await firstAdmin();
     const { license } = await createLicense(token);
-    const base = { customer: "x", branchName: "y", plan: "monthly", features: [], limits: { maxUsers: 1, maxTables: 1 } };
+    const base = { customer: "x", branchName: "y", plan: "monthly", tier: "pro", features: [], limits: { maxUsers: 1, maxTables: 1 } };
     expect((await json(await call("POST", "/admin/v1/licenses", { token, body: { ...base, siteId: license.siteId } }), 409)).error.code).toBe("conflict");
     expect((await call("POST", "/admin/v1/licenses", { token, body: { ...base, siteId: "otra", plan: "trial" } })).status).toBe(400);
   });

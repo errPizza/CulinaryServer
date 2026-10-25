@@ -1,7 +1,8 @@
 import initial from "../migrations/0001_inicial.sql";
+import tiers from "../migrations/0002_nivel_y_addons.sql";
 import { DAY_MS } from "./catalog";
 
-const MIGRATIONS: [name: string, sql: string][] = [["0001_inicial.sql", initial]];
+const MIGRATIONS: [name: string, sql: string][] = [["0001_inicial.sql", initial], ["0002_nivel_y_addons.sql", tiers]];
 const TRACKING = "CREATE TABLE IF NOT EXISTS d1_migrations (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL)";
 let ready: Promise<void> | undefined;
 

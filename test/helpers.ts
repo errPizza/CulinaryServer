@@ -95,6 +95,7 @@ export async function createLicense(token: string, overrides: Record<string, unk
     branchName: "Centro",
     siteId: `sitio-${crypto.randomUUID().slice(0, 8)}`,
     plan: "monthly",
+    tier: "lite",
     features: ["printing", "reservations"],
     limits: { maxUsers: 15, maxTables: 30 },
     ...overrides,

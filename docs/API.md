@@ -176,9 +176,11 @@ Payload de `culinary-license+jws`:
   "customer": "Restaurante La Plaza",
   "branchName": "Centro",
   "plan": "monthly",
+  "tier": "pro",
+  "addons": ["deliveryHub", "webOrdering"],
   "status": "active",
   "features": ["printing", "reservations"],
-  "limits": { "maxUsers": 15, "maxTables": 30 },
+  "limits": { "maxUsers": 15, "maxTables": 30, "maxTerminals": 10 },
   "activatedAt": "2026-10-24T15:04:05.123Z",
   "expiresAt": "2026-11-24T15:04:05.123Z",
   "validatedAt": "2026-10-25T09:00:00.000Z",
@@ -191,12 +193,14 @@ Payload de `culinary-license+jws`:
 
 | Campo | Significado |
 |---|---|
-| `plan` | `trial`, `monthly`, `annual` o `permanent`. |
+| `plan` | Periodo de cobro: `trial`, `monthly`, `annual` o `permanent`. |
+| `tier` | Nivel comercial, independiente del periodo: `lite` o `pro`. Pro incluye reservaciones y zonas avanzadas. |
+| `addons` | Subconjunto de `mobileOrdering` (comanderos móviles ilimitados), `deliveryHub` (UberEats, Rappi, DiDi Food) y `webOrdering` (web propia con menú QR). Los timbres fiscales se cobran por uso y no van en la licencia. |
 | `expiresAt` | Fin del plazo pagado; `null` en `permanent`. |
 | `validatedAt` | Última vez que el Worker validó la licencia. |
 | `offlineUntil` | `validatedAt` + 3 días: gracia sin conexión. |
 | `features` | Subconjunto de `reservations`, `reviews`, `customerRequests`, `printing`, `courses`, `promotions`, `multiBranch` (igual a `Restaurant.Modules`). |
-| `limits` | `maxUsers` y `maxTables`, de 1 a 10000. |
+| `limits` | `maxUsers` y `maxTables`, de 1 a 10000, y `maxTerminals`: terminales fijas simultáneas (los comanderos móviles no cuentan). Si el panel no lo fija, sigue al nivel: 2 en Lite y 10 en Pro. |
 | `key` | Llave de la licencia: la sucursal debe tener su privada. Certificada por la raíz junto con el resto. |
 | `revision` | Sube con cada cambio del panel. La sucursal rechaza una licencia con revisión menor a la guardada. |
 
@@ -394,11 +398,15 @@ El panel muestra `uri` como código QR una sola vez. TOTP: RFC 6238, SHA-1, 6 d�
   "siteId": "plaza-centro",
   "tenantId": "grupo-plaza",
   "plan": "trial",
+  "tier": "lite",
+  "addons": ["mobileOrdering"],
   "trialDays": 14,
   "features": ["printing", "reservations"],
   "limits": { "maxUsers": 15, "maxTables": 30 }
 }
 ```
+
+- `tier` es obligatorio; `addons` es opcional (vacío si falta). `limits.maxTerminals` es opcional y, si falta, sigue al nivel.
 
 - `siteId`: `^[a-z0-9-]{1,32}$`, único. Es el `siteId` de la sucursal.
 - `tenantId`: `^[a-z0-9-]{1,64}$`, opcional. Agrupa las sucursales de una misma empresa; si falta se genera uno.
@@ -412,8 +420,8 @@ Licencia en el panel:
 {
   "id": "...", "tenantId": "grupo-plaza", "siteId": "plaza-centro",
   "customer": "Restaurante La Plaza", "branchName": "Centro",
-  "plan": "trial", "trialDays": 14,
-  "features": ["printing", "reservations"], "limits": { "maxUsers": 15, "maxTables": 30 },
+  "plan": "trial", "tier": "lite", "addons": ["mobileOrdering"], "trialDays": 14,
+  "features": ["printing", "reservations"], "limits": { "maxUsers": 15, "maxTables": 30, "maxTerminals": 2 },
   "revision": 1,
   "status": "pending",
   "createdAt": "...", "activatedAt": null, "expiresAt": null, "validatedAt": null,
@@ -429,7 +437,7 @@ Licencia en el panel:
 |---|---|---|
 | `GET /admin/v1/licenses?tenantId=&status=` | | `{ "licenses": [Licencia] }`; `status` fuera de `pending`, `active`, `expired`, `revoked` da `400` |
 | `GET /admin/v1/licenses/{id}` | | `{ "license": Licencia }` |
-| `PATCH /admin/v1/licenses/{id}` | cualquiera de `customer`, `branchName`, `plan`, `trialDays`, `features`, `limits`, `expiresAt` | Editar, habilitar o quitar funciones. Solo `plan` y `expiresAt` mueven el vencimiento: cambiar `plan` en una licencia activada reinicia el plazo desde ahora, y `expiresAt` (futuro) lo fija a mano y gana. `trialDays` solo vale con el plan de prueba (`400` si no) y cambiarlo no mueve un plazo ya corriendo. |
+| `PATCH /admin/v1/licenses/{id}` | cualquiera de `customer`, `branchName`, `plan`, `tier`, `addons`, `trialDays`, `features`, `limits`, `expiresAt` | Editar, habilitar o quitar funciones. Solo `plan` y `expiresAt` mueven el vencimiento: cambiar `plan` en una licencia activada reinicia el plazo desde ahora, y `expiresAt` (futuro) lo fija a mano y gana. `trialDays` solo vale con el plan de prueba (`400` si no) y cambiarlo no mueve un plazo ya corriendo. |
 | `POST /admin/v1/licenses/{id}/renew` | `{}` o `{ "until": "<ISO futuro>" }` | Sin `until`, suma un periodo (mes, año o `trialDays`) al vencimiento vigente o a ahora, lo que sea posterior. `409` en `permanent`, revocada o sin activar. |
 | `POST /admin/v1/licenses/{id}/revoke` | `{ "reason": "≤500" }` | Revocación definitiva. |
 | `POST /admin/v1/licenses/{id}/reset-activation` | | Libera el equipo (borra llave, huella y registro mTLS) y devuelve `{ "license", "activationCode" }` nuevo. |

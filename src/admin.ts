@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { z } from "zod";
 import { requireAdmin } from "./admin-auth";
-import { featuresSchema, limitsSchema, PLANS, termEnd, type Plan } from "./catalog";
+import { addonsSchema, featuresSchema, limitsSchema, PLANS, termEnd, TIERS, type Plan } from "./catalog";
 import { ed25519Spki, issueHumanCode, rootKey, toBase64Url } from "./crypto";
 import { audit } from "./db";
 import { ApiError, parse, readJson, uniqueOr409, type App } from "./http";
@@ -20,6 +20,8 @@ const createSchema = z.strictObject({
   siteId: slug(32),
   tenantId: slug(64).optional(),
   plan: z.enum(PLANS),
+  tier: z.enum(TIERS),
+  addons: addonsSchema.default([]),
   trialDays: trialDays.optional(),
   features: featuresSchema,
   limits: limitsSchema
@@ -31,6 +33,8 @@ const editSchema = z.strictObject({
   customer: z.string().trim().min(1).max(150).optional(),
   branchName: z.string().trim().min(1).max(150).optional(),
   plan: z.enum(PLANS).optional(),
+  tier: z.enum(TIERS).optional(),
+  addons: addonsSchema.optional(),
   trialDays: trialDays.optional(),
   features: featuresSchema.optional(),
   limits: limitsSchema.optional(),
@@ -78,7 +82,7 @@ admin.post("/licenses", async (c) => {
   const input = await readJson(c, createSchema);
   const id = crypto.randomUUID();
   const activation = await issueHumanCode();
-  const insert = c.env.DB.prepare(`INSERT INTO license (id, tenant_id, site_id, customer, branch_name, plan, trial_days, features, limits, revision, created_at, activation_code_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?) RETURNING *`).bind(id, input.tenantId ?? crypto.randomUUID(), input.siteId, input.customer, input.branchName, input.plan, input.trialDays ?? null, JSON.stringify(input.features), JSON.stringify(input.limits), new Date().toISOString(), activation.hash).first<LicenseRow>();
+  const insert = c.env.DB.prepare(`INSERT INTO license (id, tenant_id, site_id, customer, branch_name, plan, tier, addons, trial_days, features, limits, revision, created_at, activation_code_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?) RETURNING *`).bind(id, input.tenantId ?? crypto.randomUUID(), input.siteId, input.customer, input.branchName, input.plan, input.tier, JSON.stringify(input.addons), input.trialDays ?? null, JSON.stringify(input.features), JSON.stringify(input.limits), new Date().toISOString(), activation.hash).first<LicenseRow>();
   const row = await uniqueOr409(insert, "Ese siteId ya tiene licencia");
   
   await audit(c.env.DB, c.var.admin.id, "license.create", id, input);
@@ -109,11 +113,13 @@ admin.patch("/licenses/:id", async (c) => {
 
   const expiresAt = nextExpiry(row, plan, days, input);
 
-  const updated = await c.env.DB.prepare("UPDATE license SET customer = ?, branch_name = ?, plan = ?, trial_days = ?, features = ?, limits = ?, expires_at = ?, revision = revision + 1 WHERE id = ? RETURNING *").bind(
-      
+  const updated = await c.env.DB.prepare("UPDATE license SET customer = ?, branch_name = ?, plan = ?, tier = ?, addons = ?, trial_days = ?, features = ?, limits = ?, expires_at = ?, revision = revision + 1 WHERE id = ? RETURNING *").bind(
+
     input.customer ?? row.customer,
     input.branchName ?? row.branch_name,
     plan,
+    input.tier ?? row.tier,
+    input.addons ? JSON.stringify(input.addons) : row.addons,
     days,
     input.features ? JSON.stringify(input.features) : row.features,
     input.limits ? JSON.stringify(input.limits) : row.limits,
