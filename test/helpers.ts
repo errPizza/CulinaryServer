@@ -103,14 +103,14 @@ export async function createLicense(token: string, overrides: Record<string, unk
   return json<{ license: any; activationCode: string }>(await call("POST", "/admin/v1/licenses", { token, body }), 201);
 }
 
-export async function activate(licenseId: string, activationCode: string, device: Device, binding: unknown = { kind: "fingerprint", fingerprint }) {
-  return signed("branch", device, licenseId, "POST", "/branch/v1/activate", { body: { activationCode, key: { alg: device.alg, spki: device.spki }, binding } });
+export async function activate(license: { id: string; siteId: string }, activationCode: string, device: Device, binding: unknown = { kind: "fingerprint", fingerprint }, siteId = license.siteId) {
+  return signed("branch", device, license.id, "POST", "/branch/v1/activate", { body: { activationCode, siteId, key: { alg: device.alg, spki: device.spki }, binding } });
 }
 
 export async function activatedBranch(token: string, overrides: Record<string, unknown> = {}) {
   const { license, activationCode } = await createLicense(token, overrides);
   const device = await newDevice();
-  await json(await activate(license.id, activationCode, device), 200);
+  await json(await activate(license, activationCode, device), 200);
   return { license, device };
 }
 

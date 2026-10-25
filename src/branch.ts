@@ -14,6 +14,7 @@ const fingerprintSchema = z.strictObject({ board: hex64, disk: hex64, mac: hex64
 const activateSchema = z.strictObject({
 
   activationCode: z.string().min(20).max(40),
+  siteId: z.string().regex(/^[a-z0-9-]{1,32}$/),
   key: publicKeySchema,
   binding: z.discriminatedUnion("kind", [
     z.strictObject({ kind: z.literal("tpm") }),
@@ -66,6 +67,8 @@ branch.post("/activate", async (c) => {
   if (!license?.activation_code_hash) throw invalid;
   if (!(await verifySigned(c, "branch", request, input.key.alg, input.key.spki))) throw unauthorized();
   if (!(await sameSecret(await hashHumanCode(input.activationCode), license.activation_code_hash))) throw invalid;
+  // Checked before anything is written, so a branch with another siteId neither spends the code nor binds its key.
+  if (input.siteId !== license.site_id) throw new ApiError(409, "site_mismatch", `La licencia es de la sucursal ${license.site_id}, no de ${input.siteId}`);
 
   await rootKey(c.env.ROOT_PRIVATE_KEY);
 

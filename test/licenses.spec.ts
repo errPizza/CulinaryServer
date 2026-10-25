@@ -14,7 +14,7 @@ describe("activación", () => {
     const { token } = await firstAdmin();
     const { license, activationCode } = await createLicense(token);
     const device = await newDevice();
-    const { license: jws } = await json(await activate(license.id, activationCode, device), 200);
+    const { license: jws } = await json(await activate(license, activationCode, device), 200);
     const payload = await verifyJws(jws, "culinary-license+jws");
     expect(payload).toMatchObject({
       v: 1,
@@ -36,9 +36,9 @@ describe("activación", () => {
   it("acepta la llave ES256 de un TPM y rechaza una Ed25519 declarada como TPM", async () => {
     const { token } = await firstAdmin();
     const { license, activationCode } = await createLicense(token);
-    expect((await activate(license.id, activationCode, await newDevice("Ed25519"), { kind: "tpm" })).status).toBe(400);
+    expect((await activate(license, activationCode, await newDevice("Ed25519"), { kind: "tpm" })).status).toBe(400);
     const tpm = await newDevice("ES256");
-    const { license: jws } = await json(await activate(license.id, activationCode, tpm, { kind: "tpm" }), 200);
+    const { license: jws } = await json(await activate(license, activationCode, tpm, { kind: "tpm" }), 200);
     expect((await verifyJws(jws, "culinary-license+jws")).binding).toBe("tpm");
     await json(await renew(tpm, license.id, {}), 200);
   });
@@ -46,23 +46,32 @@ describe("activación", () => {
   it("no deja activar dos veces con el mismo código", async () => {
     const { token } = await firstAdmin();
     const { license, activationCode } = await createLicense(token);
-    await json(await activate(license.id, activationCode, await newDevice()), 200);
-    const second = await activate(license.id, activationCode, await newDevice());
+    await json(await activate(license, activationCode, await newDevice()), 200);
+    const second = await activate(license, activationCode, await newDevice());
     expect((await json(second, 403)).error.code).toBe("activation_rejected");
   });
 
   it("rechaza un código equivocado y conserva el bueno", async () => {
     const { token } = await firstAdmin();
     const { license, activationCode } = await createLicense(token);
-    expect((await activate(license.id, "AAAAA-AAAAA-AAAAA-AAAAA", await newDevice())).status).toBe(403);
-    await json(await activate(license.id, activationCode.toLowerCase().replace(/-/g, " "), await newDevice()), 200);
+    expect((await activate(license, "AAAAA-AAAAA-AAAAA-AAAAA", await newDevice())).status).toBe(403);
+    await json(await activate(license, activationCode.toLowerCase().replace(/-/g, " "), await newDevice()), 200);
+  });
+
+  it("una sucursal con otro siteId no gasta el código ni liga su llave", async () => {
+    const { token } = await firstAdmin();
+    const { license, activationCode } = await createLicense(token);
+    const wrong = await activate(license, activationCode, await newDevice(), undefined, "otra-sucursal");
+    expect((await json(wrong, 409)).error.code).toBe("site_mismatch");
+    expect((await json(await call("GET", `/admin/v1/licenses/${license.id}`, { token }), 200)).license.status).toBe("pending");
+    await json(await activate(license, activationCode, await newDevice()), 200);
   });
 
   it("una activación rechazada por vencimiento no gasta el código", async () => {
     const { token } = await firstAdmin();
     const { license, activationCode } = await createLicense(token);
     await expire(license.id);
-    expect((await json(await activate(license.id, activationCode, await newDevice()), 403)).error.code).toBe("license_expired");
+    expect((await json(await activate(license, activationCode, await newDevice()), 403)).error.code).toBe("license_expired");
     const row = await env.DB.prepare("SELECT activation_code_hash, key_spki FROM license WHERE id = ?").bind(license.id).first<Pick<LicenseRow, "activation_code_hash" | "key_spki">>();
     expect(row).toEqual({ activation_code_hash: expect.any(String), key_spki: null });
   });
@@ -71,14 +80,14 @@ describe("activación", () => {
     const { token } = await firstAdmin();
     const { license, activationCode } = await createLicense(token, { plan: "trial", trialDays: 14 });
     expect(license.expiresAt).toBeNull();
-    const payload = await verifyJws((await json(await activate(license.id, activationCode, await newDevice()), 200)).license, "culinary-license+jws");
+    const payload = await verifyJws((await json(await activate(license, activationCode, await newDevice()), 200)).license, "culinary-license+jws");
     expect(Date.parse(payload.expiresAt) - Date.parse(payload.activatedAt)).toBe(14 * DAY_MS);
   });
 
   it("la licencia permanente no tiene vencimiento", async () => {
     const { token } = await firstAdmin();
     const { license, activationCode } = await createLicense(token, { plan: "permanent" });
-    const payload = await verifyJws((await json(await activate(license.id, activationCode, await newDevice()), 200)).license, "culinary-license+jws");
+    const payload = await verifyJws((await json(await activate(license, activationCode, await newDevice()), 200)).license, "culinary-license+jws");
     expect(payload.expiresAt).toBeNull();
   });
 });
@@ -147,7 +156,7 @@ describe("edición desde el panel", () => {
     const { token } = await firstAdmin();
     const { license, activationCode } = await createLicense(token);
     const device = await newDevice();
-    const first = await verifyJws((await json(await activate(license.id, activationCode, device), 200)).license, "culinary-license+jws");
+    const first = await verifyJws((await json(await activate(license, activationCode, device), 200)).license, "culinary-license+jws");
     await json(await call("PATCH", `/admin/v1/licenses/${license.id}`, { token, body: { features: ["multiBranch", "printing"], limits: { maxUsers: 40, maxTables: 80 } } }), 200);
     const next = await verifyJws((await json(await renew(device, license.id), 200)).license, "culinary-license+jws");
     expect(next.revision).toBeGreaterThan(first.revision);
@@ -160,7 +169,7 @@ describe("edición desde el panel", () => {
     const { license, activationCode } = await createLicense(token, { addons: ["mobileOrdering"] });
     expect(license).toMatchObject({ tier: "lite", addons: ["mobileOrdering"], limits: { maxTerminals: 2 } });
     const device = await newDevice();
-    await json(await activate(license.id, activationCode, device), 200);
+    await json(await activate(license, activationCode, device), 200);
     await json(await call("PATCH", `/admin/v1/licenses/${license.id}`, { token, body: { tier: "pro", addons: ["webOrdering", "deliveryHub", "webOrdering"] } }), 200);
     const pro = await verifyJws((await json(await renew(device, license.id), 200)).license, "culinary-license+jws");
     expect(pro).toMatchObject({ tier: "pro", addons: ["deliveryHub", "webOrdering"], limits: { maxTerminals: 10 } });
@@ -181,7 +190,7 @@ describe("edición desde el panel", () => {
   it("renovar suma un periodo desde el vencimiento vigente", async () => {
     const { token } = await firstAdmin();
     const { license, activationCode } = await createLicense(token, { plan: "annual" });
-    const payload = await verifyJws((await json(await activate(license.id, activationCode, await newDevice()), 200)).license, "culinary-license+jws");
+    const payload = await verifyJws((await json(await activate(license, activationCode, await newDevice()), 200)).license, "culinary-license+jws");
     const renewed = await json(await call("POST", `/admin/v1/licenses/${license.id}/renew`, { token, body: {} }), 200);
     expect(renewed.license.expiresAt).toBe(termEnd("annual", null, new Date(payload.expiresAt))!.toISOString());
   });
@@ -190,10 +199,10 @@ describe("edición desde el panel", () => {
     const { token } = await firstAdmin();
     const { license, activationCode } = await createLicense(token);
     const old = await newDevice();
-    await json(await activate(license.id, activationCode, old), 200);
+    await json(await activate(license, activationCode, old), 200);
     const reset = await json(await call("POST", `/admin/v1/licenses/${license.id}/reset-activation`, { token }), 200);
     const replacement = await newDevice("ES256");
-    await json(await activate(license.id, reset.activationCode, replacement, { kind: "tpm" }), 200);
+    await json(await activate(license, reset.activationCode, replacement, { kind: "tpm" }), 200);
     expect((await renew(old, license.id)).status).toBe(401);
     await json(await renew(replacement, license.id, {}), 200);
   });

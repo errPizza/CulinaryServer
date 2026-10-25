@@ -147,6 +147,7 @@ La primera vez, con el código que entrega el panel. La sucursal genera su llave
 ```json
 {
   "activationCode": "K7Q2M-9XWZT-4HPLA-R3VNE",
+  "siteId": "plaza-centro",
   "key": { "alg": "ES256", "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE..." },
   "binding": { "kind": "tpm" }
 }
@@ -160,7 +161,7 @@ El código no distingue mayúsculas, guiones ni espacios. Respuesta `200`:
 { "license": "<JWS culinary-license+jws>" }
 ```
 
-El código sirve una sola vez. El plazo de la prueba, mensual o anual empieza en este momento, salvo que el panel haya fijado `expiresAt` antes. Si la activación se rechaza (licencia vencida, `503`), el código no se gasta y la llave no queda ligada.
+El código sirve una sola vez. El plazo de la prueba, mensual o anual empieza en este momento, salvo que el panel haya fijado `expiresAt` antes. Si la activación se rechaza (licencia vencida, `503`), el código no se gasta y la llave no queda ligada. Lo mismo si `siteId` no es el de la licencia: `409 site_mismatch`, con el siteId esperado en el mensaje.
 
 ### 4.3 Licencia de uso
 
