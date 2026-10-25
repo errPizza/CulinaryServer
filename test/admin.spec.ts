@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { totpCode } from "../src/crypto";
 import { call, challenge, enrollAdmin, firstAdmin, json, newDevice, PASSWORD, signed, signedAdmin, step } from "./helpers";
 
@@ -106,6 +106,24 @@ describe("panel de administrador", () => {
     const root = await json(await call("GET", "/admin/v1/root-key", { token: session.token }), 200);
     expect(root.spki).toBe(env.ROOT_PUBLIC_SPKI);
     expect(root.pem).toContain("BEGIN PUBLIC KEY");
+  });
+
+  it("cambia una contraseña olvidada con la llave del equipo y el código TOTP, y cierra las sesiones", async () => {
+    const session = await firstAdmin();
+    const later = () => vi.setSystemTime(Date.now() + 60_000);
+    const reset = (totp: string, device = session.device) => signed("admin", device, session.username, "POST", "/admin/v1/password", { body: { totp, newPassword: "contraseña nueva y larga" } });
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      later();
+      expect((await reset(await totpCode(session.totpSecret, step()), await newDevice())).status).toBe(401);
+      expect((await reset("000000")).status).toBe(401);
+      await json(await reset(await totpCode(session.totpSecret, step())), 200);
+      expect((await call("GET", "/admin/v1/me", { token: session.token })).status).toBe(401);
+      later();
+      expect((await login(session, PASSWORD, await totpCode(session.totpSecret, step()))).status).toBe(401);
+      later();
+      await json(await login(session, "contraseña nueva y larga", await totpCode(session.totpSecret, step())), 200);
+    } finally { vi.useRealTimers(); }
   });
 
   it("registra en la auditoría las acciones del panel", async () => {

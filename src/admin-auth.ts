@@ -160,6 +160,35 @@ adminAuth.post("/login", async (c) => {
   return c.json({ token, expiresAt: new Date(expires).toISOString(), admin: { id: admin.id, username: admin.username } });
 });
 
+// Forgotten password: the device key and the authenticator code stand in for it. Shares the login lockout and closes every session.
+adminAuth.post("/password", async (c) => {
+
+  const request = await readSigned(c);
+  const input = parseJson(z.strictObject({ totp, newPassword: z.string().min(12).max(256) }), request.body);
+  const admin = await adminByUsername(c.env.DB, request.subject);
+
+  if (!admin?.active) throw loginFailed();
+  if (!(await verifySigned(c, "admin", request, admin.key_alg, admin.key_spki))) throw loginFailed();
+  if (admin.locked_until > Date.now()) throw new ApiError(429, "rate_limited", "Cuenta bloqueada temporalmente por intentos fallidos");
+
+  const step = await verifyTotp(admin.totp_secret, input.totp, Date.now(), admin.totp_last_step);
+  const accepted = step !== null && (await c.env.DB.prepare("UPDATE admin SET failed_logins = 0, locked_until = 0, totp_last_step = ?1, password_hash = ?2 WHERE id = ?3 AND totp_last_step < ?1 RETURNING id").bind(step, await hashPassword(input.newPassword), admin.id).first());
+
+  if (!accepted) {
+
+    await c.env.DB.prepare("UPDATE admin SET failed_logins = CASE WHEN failed_logins + 1 >= ?1 THEN 0 ELSE failed_logins + 1 END, locked_until = CASE WHEN failed_logins + 1 >= ?1 THEN ?2 ELSE locked_until END WHERE id = ?3").bind(MAX_FAILED_LOGINS, Date.now() + LOCKOUT_MS, admin.id).run();
+    await audit(c.env.DB, admin.id, "admin.password_failed", admin.id);
+
+    throw loginFailed();
+
+  }
+
+  await c.env.DB.prepare("DELETE FROM admin_session WHERE admin_id = ?").bind(admin.id).run();
+  await audit(c.env.DB, admin.id, "admin.password", admin.id);
+
+  return c.json({ ok: true });
+});
+
 export const requireAdmin: MiddlewareHandler<App> = async (c, next) => {
 
   const sessionHash = await bearerHash(c, "Inicia sesión en el panel");

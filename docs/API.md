@@ -369,6 +369,8 @@ El panel muestra `uri` como código QR una sola vez. TOTP: RFC 6238, SHA-1, 6 d�
 - Tres factores: llave del dispositivo, contraseña y TOTP. Cualquier fallo responde `401` con el mismo mensaje.
 - Cinco fallos con firma válida bloquean la cuenta 15 minutos (`429`).
 - La sesión dura 8 horas. Las demás rutas piden `Authorization: Bearer <token>`.
+
+**Contraseña olvidada**: `POST /admin/v1/password`, firmada igual y sin sesión: `{ "totp": "123456", "newPassword": "mínimo 12 caracteres" }` → `200 { "ok": true }`. La llave del dispositivo y el TOTP sustituyen a la contraseña; comparte el bloqueo de cinco fallos con el inicio de sesión y cierra todas las sesiones de la cuenta. Si además se perdió el TOTP o el equipo, otro administrador borra la cuenta y envía una invitación (o, sin otro administrador, el procedimiento de recuperación del README).
 - `POST /admin/v1/invites` y `DELETE /admin/v1/admins/{id}` piden además la firma del dispositivo (sección 2, scope `admin`, subject = el `username` de la sesión). Así un token robado no basta para crear ni borrar cuentas.
 
 | Método y ruta | Respuesta |
