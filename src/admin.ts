@@ -38,7 +38,8 @@ const editSchema = z.strictObject({
   trialDays: trialDays.optional(),
   features: featuresSchema.optional(),
   limits: limitsSchema.optional(),
-  expiresAt: futureDate.optional()
+  expiresAt: futureDate.optional(),
+  siteId: slug(32).optional()
 
 });
 
@@ -49,9 +50,19 @@ const listQuery = z.strictObject({
 
 });
 
-async function editable(db: D1Database, id: string): Promise<LicenseRow> {
+// The panel no longer sees a deleted license; the branch side keeps finding it as revoked.
+async function listed(db: D1Database, id: string): Promise<LicenseRow> {
 
   const row = await getLicense(db, id);
+
+  if (row.deleted_at) throw new ApiError(404, "not_found", "Licencia no encontrada");
+
+  return row;
+}
+
+async function editable(db: D1Database, id: string): Promise<LicenseRow> {
+
+  const row = await listed(db, id);
 
   if (row.revoked_at) throw new ApiError(409, "conflict", "La licencia está revocada");
 
@@ -93,12 +104,12 @@ admin.post("/licenses", async (c) => {
 admin.get("/licenses", async (c) => {
 
   const { tenantId, status } = parse(listQuery, c.req.query());
-  const { results } = await c.env.DB.prepare("SELECT * FROM license WHERE ?1 IS NULL OR tenant_id = ?1 ORDER BY created_at DESC").bind(tenantId ?? null).all<LicenseRow>();
+  const { results } = await c.env.DB.prepare("SELECT * FROM license WHERE deleted_at IS NULL AND (?1 IS NULL OR tenant_id = ?1) ORDER BY created_at DESC").bind(tenantId ?? null).all<LicenseRow>();
 
   return c.json({ licenses: results.filter((r) => !status || licenseStatus(r) === status).map(licenseView) });
 });
 
-admin.get("/licenses/:id", async (c) => c.json({ license: licenseView(await getLicense(c.env.DB, c.req.param("id"))) }));
+admin.get("/licenses/:id", async (c) => c.json({ license: licenseView(await listed(c.env.DB, c.req.param("id"))) }));
 
 admin.patch("/licenses/:id", async (c) => {
 
@@ -110,11 +121,14 @@ admin.patch("/licenses/:id", async (c) => {
   if (plan === "trial" && !days) throw new ApiError(400, "bad_request", "trialDays: requerido para el plan de prueba");
   if (plan !== "trial" && input.trialDays !== undefined) throw new ApiError(400, "bad_request", "trialDays: va solo con el plan de prueba");
   if (plan === "permanent" && input.expiresAt) throw new ApiError(400, "bad_request", "expiresAt: la licencia permanente no vence");
+  // The signed license carries the siteId and the bound branch checks it against its own, so it changes only while no machine holds it.
+  if (input.siteId && input.siteId !== row.site_id && row.binding_kind) throw new ApiError(409, "conflict", "Libera el equipo antes de cambiar el siteId");
 
   const expiresAt = nextExpiry(row, plan, days, input);
 
-  const updated = await c.env.DB.prepare("UPDATE license SET customer = ?, branch_name = ?, plan = ?, tier = ?, addons = ?, trial_days = ?, features = ?, limits = ?, expires_at = ?, revision = revision + 1 WHERE id = ? RETURNING *").bind(
+  const update = c.env.DB.prepare("UPDATE license SET site_id = ?, customer = ?, branch_name = ?, plan = ?, tier = ?, addons = ?, trial_days = ?, features = ?, limits = ?, expires_at = ?, revision = revision + 1 WHERE id = ? RETURNING *").bind(
 
+    input.siteId ?? row.site_id,
     input.customer ?? row.customer,
     input.branchName ?? row.branch_name,
     plan,
@@ -127,10 +141,24 @@ admin.patch("/licenses/:id", async (c) => {
     row.id
 
   ).first<LicenseRow>();
+  const updated = await uniqueOr409(update, "Ese siteId ya tiene licencia");
 
   await audit(c.env.DB, c.var.admin.id, "license.edit", row.id, input);
 
   return c.json({ license: licenseView(updated!) });
+});
+
+// Hides the license from the panel. It is revoked first, so a branch still using it locks on its next contact, and its
+// siteId and mTLS certificate are freed for a new license. The row stays for tickets, publications and the audit.
+admin.delete("/licenses/:id", async (c) => {
+
+  const row = await listed(c.env.DB, c.req.param("id"));
+  const now = new Date().toISOString();
+
+  await c.env.DB.prepare("UPDATE license SET deleted_at = ?1, revoked_at = COALESCE(revoked_at, ?1), revoke_reason = COALESCE(revoke_reason, 'Eliminada desde el panel'), site_id = 'eliminada-' || id, central_cert_sha256 = NULL, activation_code_hash = NULL, revision = revision + 1 WHERE id = ?2").bind(now, row.id).run();
+  await audit(c.env.DB, c.var.admin.id, "license.delete", row.id, { siteId: row.site_id, customer: row.customer, branchName: row.branch_name, status: licenseStatus(row) });
+
+  return c.json({ ok: true });
 });
 
 admin.post("/licenses/:id/renew", async (c) => {

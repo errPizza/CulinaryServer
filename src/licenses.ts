@@ -30,6 +30,7 @@ export type LicenseRow = {
   fp_mac: string | null;
   validated_at: string | null;
   central_cert_sha256: string | null;
+  deleted_at: string | null;
 
 };
 

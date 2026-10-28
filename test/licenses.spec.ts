@@ -232,3 +232,34 @@ describe("plazos", () => {
     expect(nextExpiry(row, "monthly", null, {}, at)).toBe(row.expires_at);
   });
 });
+
+describe("siteId y eliminación desde el panel", () => {
+  it("cambia el siteId mientras ningún equipo tiene la licencia y la activación usa el nuevo", async () => {
+    const { token } = await firstAdmin();
+    const { license, activationCode } = await createLicense(token);
+    const other = await createLicense(token);
+    expect((await json(await call("PATCH", `/admin/v1/licenses/${license.id}`, { token, body: { siteId: other.license.siteId } }), 409)).error.code).toBe("conflict");
+    const moved = await json(await call("PATCH", `/admin/v1/licenses/${license.id}`, { token, body: { siteId: "sitio-nuevo" } }), 200);
+    expect(moved.license.siteId).toBe("sitio-nuevo");
+    expect((await activate(license, activationCode, await newDevice())).status).toBe(409);
+    await json(await activate(moved.license, activationCode, await newDevice()), 200);
+    expect((await call("PATCH", `/admin/v1/licenses/${license.id}`, { token, body: { siteId: "sitio-otro" } })).status).toBe(409);
+    const reset = await json(await call("POST", `/admin/v1/licenses/${license.id}/reset-activation`, { token }), 200);
+    expect((await json(await call("PATCH", `/admin/v1/licenses/${license.id}`, { token, body: { siteId: "sitio-otro" } }), 200)).license.siteId).toBe("sitio-otro");
+    expect(reset.activationCode).toBeTruthy();
+  });
+
+  it("eliminar la quita del panel, bloquea a la sucursal y libera su siteId", async () => {
+    const { token } = await firstAdmin();
+    const { device, license } = await activatedBranch(token);
+    await json(await call("DELETE", `/admin/v1/licenses/${license.id}`, { token }), 200);
+    const { licenses } = await json(await call("GET", "/admin/v1/licenses", { token }), 200);
+    expect(licenses.some((l: any) => l.id === license.id)).toBe(false);
+    expect((await call("GET", `/admin/v1/licenses/${license.id}`, { token })).status).toBe(404);
+    expect((await call("DELETE", `/admin/v1/licenses/${license.id}`, { token })).status).toBe(404);
+    expect((await json(await renew(device, license.id), 403)).error.code).toBe("license_revoked");
+    await createLicense(token, { siteId: license.siteId });
+    const { entries } = await json(await call("GET", "/admin/v1/audit", { token }), 200);
+    expect(entries.find((e: any) => e.action === "license.delete").detail.siteId).toBe(license.siteId);
+  });
+});
