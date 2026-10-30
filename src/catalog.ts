@@ -12,7 +12,7 @@ export const ADDONS = ["mobileOrdering", "deliveryHub", "webOrdering"] as const;
 export const addonsSchema = z.array(z.enum(ADDONS)).max(ADDONS.length).transform((list) => [...new Set(list)].sort());
 export const PLATFORMS = ["linux-x64", "win-x64", "android-arm64"] as const;
 export const DAY_MS = 24 * 60 * 60 * 1000;
-export const OFFLINE_GRACE_MS = 3 * DAY_MS;
+export const OFFLINE_GRACE_MS = 7 * DAY_MS;
 export const VERSION_PATTERN = /^(\d{1,5})\.(\d{1,5})\.(\d{1,5})$/;
 
 export const limitsSchema = z.strictObject({

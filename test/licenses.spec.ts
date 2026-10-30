@@ -29,7 +29,7 @@ describe("activación", () => {
       key: { alg: "Ed25519", spki: device.spki },
       binding: "fingerprint",
     });
-    expect(Date.parse(payload.offlineUntil) - Date.parse(payload.validatedAt)).toBe(3 * DAY_MS);
+    expect(Date.parse(payload.offlineUntil) - Date.parse(payload.validatedAt)).toBe(7 * DAY_MS);
     expect(payload.expiresAt).toBe(termEnd("monthly", null, new Date(payload.activatedAt))!.toISOString());
   });
 

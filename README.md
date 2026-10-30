@@ -15,7 +15,7 @@ Cualquier otra ruta responde 404, y el panel solo admite CORS desde los orígene
 
   Cada documento lleva en su encabezado (`chain`) el certificado de su intermedia, y la sucursal sólo acepta de cada intermedia los tipos que el certificado lista. Si alguien toma el Worker, puede firmar licencias, pero no autorizar bytes que la estación no firmó. Los retos usan su propia llave (`CHALLENGE_KEY`). El procedimiento completo está en [docs/LLAVES.md](docs/LLAVES.md).
 - **Licencia de uso.** Al activar, la sucursal genera su propia llave (no exportable dentro del TPM 2.0 si lo hay; si no, una llave ligada a la huella de placa, disco y MAC). El Worker certifica esa llave con la intermedia de licencias junto con el plan, las funciones y los límites. Cada renovación firma un reto del servidor con esa llave, así que copiar la licencia a otro equipo no sirve.
-- **Gracia sin conexión.** Cada licencia incluye `offlineUntil`: 3 días desde la última validación. Una licencia vencida o revocada ya no se renueva y recibe un aviso firmado para la pantalla de bloqueo.
+- **Gracia sin conexión.** Cada licencia incluye `offlineUntil`: 7 días desde la última validación. Una licencia vencida o revocada ya no se renueva y recibe un aviso firmado para la pantalla de bloqueo.
 - **Panel.** Cada cuenta es un dispositivo con su llave, más contraseña y TOTP. Las cuentas siguientes entran por invitación.
 - **Almacenamiento.** D1 para los datos y R2 para los paquetes. El Worker aplica sus migraciones (`migrations/`) solo, en la primera solicitud, porque el despliegue desde Git no escribe el ID de la base en el repositorio.
 
@@ -97,7 +97,7 @@ Las pruebas corren dentro del runtime de Workers con `@cloudflare/vitest-plugin`
 - **El plazo empieza al activar**, también en mensual y anual. El panel puede fijar `expiresAt` antes de activar si el cobro empezó otro día.
 - **Huella sin TPM:** basta con que coincidan dos de tres partes (placa, disco, MAC), para que cambiar una pieza no bloquee la sucursal. Con dos cambios, el proveedor libera el equipo desde el panel.
 - **TPM sin atestación:** el Worker registra la llave pública que la sucursal declara como del TPM (exige que sea P-256), pero no verifica el certificado de respaldo (EK) del fabricante.
-- **La huella de hardware solo se revisa al renovar.** Las demás rutas de la sucursal confían en la firma de la llave. Una llave copiada a otro equipo deja de renovar, y a los 3 días la licencia se bloquea sola.
+- **La huella de hardware solo se revisa al renovar.** Las demás rutas de la sucursal confían en la firma de la llave. Una llave copiada a otro equipo deja de renovar, y a los 7 días la licencia se bloquea sola.
 - **El registro mTLS no prueba la posesión del certificado.** Una sucursal con licencia podría registrar primero la huella del certificado de otra; la verdadera recibiría `409`. El proveedor lo ve en `GET /admin/v1/registry` y lo corrige liberando el equipo.
 - **La misma raíz firma los paquetes.** Es lo pedido (una sola llave, en el Worker). Si alguien tomara el control del Worker podría firmar un paquete; una llave de publicación aparte, fuera de línea, cerraría ese hueco.
 - **Revocar es definitivo.** Para volver a dar servicio se crea otra licencia.

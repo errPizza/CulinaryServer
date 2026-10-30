@@ -189,7 +189,7 @@ Payload de `culinary-license+jws`:
   "activatedAt": "2026-10-24T15:04:05.123Z",
   "expiresAt": "2026-11-24T15:04:05.123Z",
   "validatedAt": "2026-10-25T09:00:00.000Z",
-  "offlineUntil": "2026-10-28T09:00:00.000Z",
+  "offlineUntil": "2026-11-01T09:00:00.000Z",
   "key": { "alg": "ES256", "spki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE..." },
   "binding": "tpm",
   "iat": "2026-10-25T09:00:00.000Z"
@@ -203,7 +203,7 @@ Payload de `culinary-license+jws`:
 | `addons` | Subconjunto de `mobileOrdering` (comanderos móviles ilimitados), `deliveryHub` (UberEats, Rappi, DiDi Food) y `webOrdering` (web propia con menú QR). Los timbres fiscales se cobran por uso y no van en la licencia. |
 | `expiresAt` | Fin del plazo pagado; `null` en `permanent`. |
 | `validatedAt` | Última vez que el Worker validó la licencia. |
-| `offlineUntil` | `validatedAt` + 3 días: gracia sin conexión. |
+| `offlineUntil` | `validatedAt` + 7 días: gracia cuando el servicio no responde. |
 | `features` | Subconjunto de `reservations`, `reviews`, `customerRequests`, `printing`, `courses`, `promotions`, `multiBranch` (igual a `Restaurant.Modules`). |
 | `limits` | `maxUsers` y `maxTables`, de 1 a 10000, y `maxTerminals`: terminales fijas simultáneas (los comanderos móviles no cuentan). Si el panel no lo fija, sigue al nivel: 2 en Lite y 10 en Pro. |
 | `key` | Llave de la licencia: la sucursal debe tener su privada. Certificada por la raíz junto con el resto. |
