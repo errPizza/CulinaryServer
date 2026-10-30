@@ -2,12 +2,13 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { requireAdmin } from "./admin-auth";
 import { addonsSchema, featuresSchema, limitsSchema, PLANS, termEnd, TIERS, type Plan } from "./catalog";
-import { ed25519Spki, issueHumanCode, rootKey, toBase64Url } from "./crypto";
+import { ed25519Spki, issueHumanCode, toBase64Url } from "./crypto";
+import { keyFloor, licenseSigner, rootPublic } from "./keys";
 import { audit } from "./db";
 import { ApiError, parse, readJson, uniqueOr409, type App } from "./http";
 import { features, getLicense, LICENSE_STATUSES, licenseStatus, licenseView, nextExpiry, type LicenseRow } from "./licenses";
 import { addTicketMessage, adminTickets, closeTicket, ticketDetail, TICKET_STATUSES } from "./tickets";
-import { abortRelease, completeRelease, completeSchema, createRelease, listPublications, listReleases, publicationSchema, publish, releaseSchema, uploadPart, withdraw } from "./updates";
+import { abortRelease, attachManifest, completeRelease, completeSchema, createRelease, listPublications, listReleases, manifestSchema, publicationSchema, publish, releaseSchema, uploadPart, withdraw } from "./updates";
 
 const slug = (max: number) => z.string().regex(new RegExp(`^[a-z0-9-]{1,${max}}$`), `1 a ${max} caracteres: minúsculas, dígitos o guion`);
 const trialDays = z.int().min(1).max(365);
@@ -73,11 +74,14 @@ export const admin = new Hono<App>().use(requireAdmin);
 
 admin.get("/root-key", async (c) => {
 
-  const root = await rootKey(c.env.ROOT_PRIVATE_KEY);
-  const spki = ed25519Spki(root.publicRaw);
+  const root = await rootPublic(c.env);
+  const spki = ed25519Spki(root.raw);
   const pem = `-----BEGIN PUBLIC KEY-----\n${btoa(String.fromCharCode(...spki))}\n-----END PUBLIC KEY-----\n`;
-  
-  return c.json({ kid: root.kid, alg: "EdDSA", publicKey: toBase64Url(root.publicRaw), spki: toBase64Url(spki), pem });
+  // The license intermediate in use, so the panel can warn before it expires.
+  const signer = await licenseSigner(c.env).catch(() => null);
+  const license = signer && { kid: signer.kid, generation: signer.intermediate.generation, notBefore: signer.intermediate.nbf, expiresAt: signer.intermediate.exp };
+
+  return c.json({ kid: root.kid, alg: "EdDSA", publicKey: toBase64Url(root.raw), spki: toBase64Url(spki), pem, licenseIntermediate: license, keyFloor: await keyFloor(c.env).then(({ license, release }) => ({ license, release })).catch(() => null) });
 });
 
 admin.get("/audit", async (c) => {
@@ -246,6 +250,16 @@ admin.post("/releases/:id/complete", async (c) => {
   const release = await completeRelease(c.env, c.req.param("id"), input.parts);
 
   await audit(c.env.DB, c.var.admin.id, "release.complete", release.id, { bytes: release.bytes, sha512: release.sha512 });
+
+  return c.json({ release });
+});
+
+admin.put("/releases/:id/manifest", async (c) => {
+
+  const input = await readJson(c, manifestSchema);
+  const { release, kid } = await attachManifest(c.env, c.req.param("id"), input.manifest);
+
+  await audit(c.env.DB, c.var.admin.id, "release.sign", release.id, { kid, sha512: release.sha512 });
 
   return c.json({ release });
 });

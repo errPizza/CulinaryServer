@@ -6,7 +6,11 @@ export type Env = {
 
   DB: D1Database;
   PACKAGES: R2Bucket;
-  ROOT_PRIVATE_KEY?: string;
+  ROOT_PUBLIC_SPKI?: string;
+  LICENSE_SIGNING_KEY?: string;
+  LICENSE_SIGNING_CHAIN?: string;
+  KEY_FLOOR?: string;
+  CHALLENGE_KEY?: string;
   ADMIN_SETUP_CODE?: string;
   ADMIN_ORIGINS: string;
 

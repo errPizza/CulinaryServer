@@ -1,7 +1,8 @@
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import { toHex } from "../src/crypto";
-import { activatedBranch, call, firstAdmin, json, signedBranch, verifyJws } from "./helpers";
+import { licenseSigner } from "../src/keys";
+import { activatedBranch, call, firstAdmin, json, signedBranch, stationSign, verifyJws } from "./helpers";
 
 const pkg = new TextEncoder().encode("paquete .deb de prueba ".repeat(100));
 
@@ -10,10 +11,21 @@ async function startRelease(token: string, version: string) {
   return (await json(await call("POST", "/admin/v1/releases", { token, body }), 201)).release;
 }
 
-async function uploadRelease(token: string, version = "1.4.0") {
+async function completeUpload(token: string, version = "1.4.0") {
   const release = await startRelease(token, version);
   const part = await json(await call("PUT", `/admin/v1/releases/${release.id}/parts/1`, { token, raw: pkg, headers: { "content-length": String(pkg.length) } }), 200);
   return (await json(await call("POST", `/admin/v1/releases/${release.id}/complete`, { token, body: { parts: [part] } }), 200)).release;
+}
+
+/** What the release station signs for the bytes it uploaded. */
+const manifestFor = (release: any, overrides: Record<string, unknown> = {}, key = env.TEST_RELEASE_KEY, chain: string | undefined = env.TEST_RELEASE_CHAIN) =>
+  stationSign(key, "culinary-release+jws", { releaseId: release.id, version: release.version, platform: release.platform, filename: release.filename, bytes: release.bytes, sha512: release.sha512, ...overrides }, chain);
+
+const attach = (token: string, id: string, manifest: string) => call("PUT", `/admin/v1/releases/${id}/manifest`, { token, body: { manifest } });
+
+async function uploadRelease(token: string, version = "1.4.0") {
+  const release = await completeUpload(token, version);
+  return (await json(await attach(token, release.id, await manifestFor(release)), 200)).release;
 }
 
 const publishTo = async (token: string, releaseId: string, target: unknown) =>
@@ -23,12 +35,37 @@ const check = (branch: Awaited<ReturnType<typeof activatedBranch>>, currentVersi
   signedBranch(branch, "POST", "/branch/v1/updates/check", { platform: "linux-x64", currentVersion });
 
 describe("actualizaciones", () => {
-  it("firma el paquete con el SHA-512 de lo que quedó en R2", async () => {
+  it("espera la firma de la estación con el SHA-512 de lo que quedó en R2 y no se publica antes", async () => {
     const { token } = await firstAdmin();
-    const release = await uploadRelease(token);
+    const pending = await completeUpload(token);
     const expected = toHex(new Uint8Array(await crypto.subtle.digest("SHA-512", pkg)));
-    expect(release).toMatchObject({ status: "ready", bytes: pkg.length, sha512: expected });
+    expect(pending).toMatchObject({ status: "signing", bytes: pkg.length, sha512: expected, manifest: null });
+    expect((await call("POST", "/admin/v1/publications", { token, body: { releaseId: pending.id, target: "all" } })).status).toBe(409);
+
+    const release = (await json(await attach(token, pending.id, await manifestFor(pending)), 200)).release;
+    expect(release.status).toBe("ready");
     expect(await verifyJws(release.manifest, "culinary-release+jws")).toMatchObject({ v: 1, version: "1.4.0", sha512: expected, bytes: pkg.length });
+    expect((await attach(token, pending.id, await manifestFor(pending))).status).toBe(409);
+  });
+
+  it("rechaza una firma de paquete que no es de la intermedia de paquetes o no describe los bytes subidos", async () => {
+    const { token } = await firstAdmin();
+    const pending = await completeUpload(token);
+    const license = await licenseSigner(env as never);
+    const fromLicenseKey = await manifestFor(pending, {}, env.LICENSE_SIGNING_KEY, license.chain);
+    expect((await json(await attach(token, pending.id, fromLicenseKey), 400)).error.message).toMatch(/no puede firmar/);
+    expect((await json(await attach(token, pending.id, await manifestFor(pending, { sha512: "0".repeat(128) })), 400)).error.message).toMatch(/sha512/);
+    expect((await attach(token, pending.id, await manifestFor(pending, {}, env.TEST_RELEASE_KEY, ""))).status).toBe(400);
+    expect((await call("GET", "/admin/v1/releases", { token }).then((r) => json(r, 200))).releases[0].status).toBe("signing");
+  });
+
+  it("la actualización entrega el manifiesto de la estación y el piso de llaves", async () => {
+    const { token } = await firstAdmin();
+    const branch = await activatedBranch(token);
+    await publishTo(token, (await uploadRelease(token)).id, "all");
+    const offered = await json(await check(branch), 200);
+    expect(await verifyJws(offered.release, "culinary-release+jws")).toMatchObject({ version: "1.4.0" });
+    expect(offered.keyFloor).toBeNull();
   });
 
   it("rechaza un paquete cuya extensión no corresponde a la plataforma", async () => {

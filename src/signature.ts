@@ -8,7 +8,7 @@ let macCache: { secret: string; key: Promise<CryptoKey> } | undefined;
 
 function challengeKey(secret: string | undefined): Promise<CryptoKey> {
 
-  if (!secret) throw new ApiError(503, "server_misconfigured", "Falta el secreto ROOT_PRIVATE_KEY");
+  if (!secret) throw new ApiError(503, "server_misconfigured", "Falta el secreto CHALLENGE_KEY");
   if (macCache?.secret !== secret) {
    
     const key = sha256(`culinary-challenge-v1|${secret}`).then((raw) => crypto.subtle.importKey("raw", raw, { name: "HMAC", hash: "SHA-256" }, false, ["sign", "verify"]));
@@ -28,7 +28,7 @@ export async function issueChallenge(env: Env, scope: Scope, subject: string): P
   
   const expires = Date.now() + CHALLENGE_TTL_MS;
   const random = randomBytes(16);
-  const mac = new Uint8Array(await crypto.subtle.sign("HMAC", await challengeKey(env.ROOT_PRIVATE_KEY), macInput(scope, subject, expires, random)));
+  const mac = new Uint8Array(await crypto.subtle.sign("HMAC", await challengeKey(env.CHALLENGE_KEY), macInput(scope, subject, expires, random)));
   const head = new DataView(new ArrayBuffer(8));
  
   head.setFloat64(0, expires);
@@ -46,7 +46,7 @@ async function consumeChallenge(env: Env, scope: Scope, subject: string, nonce: 
  
   if (!(expires >= Date.now())) return false;
  
-  const valid = await crypto.subtle.verify("HMAC", await challengeKey(env.ROOT_PRIVATE_KEY), bytes.slice(24), macInput(scope, subject, expires, bytes.slice(8, 24)));
+  const valid = await crypto.subtle.verify("HMAC", await challengeKey(env.CHALLENGE_KEY), bytes.slice(24), macInput(scope, subject, expires, bytes.slice(8, 24)));
   
   if (!valid) return false;
  

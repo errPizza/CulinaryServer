@@ -160,53 +160,11 @@ export async function verifySignature(alg: KeyAlg, key: CryptoKey, signature: Ui
   return crypto.subtle.verify(KEY_PARAMS[alg].sign, key, signature, data);
 }
 
-export type RootKey = { privateKey: CryptoKey; publicRaw: Uint8Array<ArrayBuffer>; kid: string };
-
-let rootCache: { secret: string; key: Promise<RootKey> } | undefined;
-
-export async function rootKey(secret: string | undefined): Promise<RootKey> {
-
-  if (!secret) throw new ApiError(503, "server_misconfigured", "Falta el secreto ROOT_PRIVATE_KEY");
-  if (rootCache?.secret !== secret) {
-
-    const key = loadRootKey(secret).catch(() => {
-
-      throw new ApiError(503, "server_misconfigured", "ROOT_PRIVATE_KEY no es una llave Ed25519 PKCS#8");
-
-    });
-
-    rootCache = { secret, key };
-
-  }
-
-  return rootCache.key;
-}
-
-async function loadRootKey(secret: string): Promise<RootKey> {
- 
-  const body = secret.replace(/-----[^-]+-----/g, "").replace(/\s/g, "").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-  const privateKey = await crypto.subtle.importKey("pkcs8", fromBase64Url(body), { name: "Ed25519" }, true, ["sign"]);
-  const jwk = (await crypto.subtle.exportKey("jwk", privateKey)) as JsonWebKey;
-  const publicRaw = fromBase64Url(jwk.x!);
-  
-  return { privateKey, publicRaw, kid: toBase64Url(await sha256(publicRaw)).slice(0, 16) };
-}
-
 export function ed25519Spki(raw: Uint8Array): Uint8Array<ArrayBuffer> {
   
   const prefix = [0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00];
   
   return new Uint8Array([...prefix, ...raw]);
-}
-
-export async function signJws(secret: string | undefined, typ: string, payload: Record<string, unknown>): Promise<string> {
- 
-  const root = await rootKey(secret);
-  const header = toBase64Url(utf8(JSON.stringify({ alg: "EdDSA", typ, kid: root.kid })));
-  const body = toBase64Url(utf8(JSON.stringify({ v: 1, ...payload, iat: new Date().toISOString() })));
-  const signature = await crypto.subtle.sign({ name: "Ed25519" }, root.privateKey, utf8(`${header}.${body}`));
- 
-  return `${header}.${body}.${toBase64Url(new Uint8Array(signature))}`;
 }
 
 const PBKDF2_ITERATIONS = 100_000;

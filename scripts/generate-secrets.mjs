@@ -1,28 +1,39 @@
-import { createHash, generateKeyPairSync, randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+// Run once on a trusted, preferably offline, machine. Creates whatever is missing in secrets/ and never overwrites:
+// rotating the root obliges reprovisioning every branch.
+import { createHash, createPublicKey, generateKeyPairSync, randomBytes } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 const dir = join(process.cwd(), "secrets");
-const privatePath = join(dir, "root-private.txt");
+const path = (name) => join(dir, name);
+mkdirSync(dir, { recursive: true });
 
-if (existsSync(privatePath)) {
+if (!existsSync(path("root-private.txt"))) {
 
-  console.error(`Ya existe ${privatePath}. Rotar la raíz obliga a reaprovisionar todas las sucursales; bórralo a mano solo si es lo que quieres.`);
-  process.exit(1);
+  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+  writeFileSync(path("root-private.txt"), privateKey.export({ type: "pkcs8", format: "der" }).toString("base64url") + "\n", { mode: 0o600 });
+  writeFileSync(path("root-public.pem"), publicKey.export({ type: "spki", format: "pem" }));
+  console.log("Llave raíz creada.");
 
 }
 
-const { publicKey, privateKey } = generateKeyPairSync("ed25519");
-const pkcs8 = privateKey.export({ type: "pkcs8", format: "der" }).toString("base64url");
-const spki = publicKey.export({ type: "spki", format: "der" });
-const raw = spki.subarray(12);
-const kid = createHash("sha256").update(raw).digest("base64url").slice(0, 16);
-const pem = publicKey.export({ type: "spki", format: "pem" });
-const setupCode = randomBytes(32).toString("base64url");
+for (const [name, label] of [["challenge-key.txt", "llave de retos"], ["admin-setup-code.txt", "código de alta del primer administrador"]]) {
 
-mkdirSync(dir, { recursive: true });
-writeFileSync(privatePath, pkcs8 + "\n", { mode: 0o600 });
-writeFileSync(join(dir, "admin-setup-code.txt"), setupCode + "\n", { mode: 0o600 });
-writeFileSync(join(dir, "root-public.pem"), pem);
+  if (existsSync(path(name))) continue;
+  writeFileSync(path(name), randomBytes(32).toString("base64url") + "\n", { mode: 0o600 });
+  console.log(`Creado ${name} (${label}).`);
 
-console.log(`Llave raíz creada (kid ${kid}). Pública, para Culinary Restaurant (secrets/root-public.pem): ${pem} Pública en bruto (base64url): ${raw.toString("base64url")}Sube los secretos al Worker:npx wrangler secret put ROOT_PRIVATE_KEY   (pega el contenido de secrets/root-private.txt) npx wrangler secret put ADMIN_SETUP_CODE   (pega el contenido de secrets/admin-setup-code.txt) Después guarda secrets/root-private.txt fuera de línea y bórralo de este equipo.`);
+}
+
+const spki = createPublicKey(readFileSync(path("root-public.pem"), "utf8")).export({ type: "spki", format: "der" });
+const kid = createHash("sha256").update(spki.subarray(12)).digest("base64url").slice(0, 16);
+
+console.log(`
+Raíz kid ${kid}. Pública para Culinary Restaurant: secrets/root-public.pem
+1. Variable pública del Worker (wrangler.jsonc, vars): ROOT_PUBLIC_SPKI = ${spki.toString("base64url")}
+2. Secretos del Worker:
+   npx wrangler secret put CHALLENGE_KEY      (contenido de secrets/challenge-key.txt)
+   npx wrangler secret put ADMIN_SETUP_CODE   (contenido de secrets/admin-setup-code.txt)
+3. Intermedias: node scripts/sign-intermediate.mjs --use license --generation 1
+                node scripts/sign-intermediate.mjs --use release --generation 1
+4. Guarda secrets/root-private.txt fuera de línea y bórralo de este equipo. El Worker ya no la necesita.`);

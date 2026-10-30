@@ -9,8 +9,12 @@ Cualquier otra ruta responde 404, y el panel solo admite CORS desde los orígene
 
 ## Cómo funciona
 
-- **Llave raíz Ed25519.** La privada vive solo como secreto del Worker (`ROOT_PRIVATE_KEY`). Firma las licencias, los avisos de bloqueo, los manifiestos de paquetes y las actualizaciones dirigidas, todo como JWS compacto.
-- **Licencia de uso.** Al activar, la sucursal genera su propia llave (no exportable dentro del TPM 2.0 si lo hay; si no, una llave ligada a la huella de placa, disco y MAC). El Worker certifica esa llave con la raíz junto con el plan, las funciones y los límites. Cada renovación firma un reto del servidor con esa llave, así que copiar la licencia a otro equipo no sirve.
+- **Llave raíz Ed25519 fuera de línea.** La privada nunca entra al Worker. Sólo firma, desde la estación del proveedor, dos llaves intermedias con vencimiento y uso limitado:
+  - **Licencias** (secretos `LICENSE_SIGNING_KEY` y `LICENSE_SIGNING_CHAIN` del Worker): licencias, avisos de bloqueo y autorizaciones de actualización.
+  - **Paquetes** (sólo en la estación): el manifiesto con el SHA-512 de cada paquete. El Worker no publica una versión hasta que se pega esa firma en el panel.
+
+  Cada documento lleva en su encabezado (`chain`) el certificado de su intermedia, y la sucursal sólo acepta de cada intermedia los tipos que el certificado lista. Si alguien toma el Worker, puede firmar licencias, pero no autorizar bytes que la estación no firmó. Los retos usan su propia llave (`CHALLENGE_KEY`). El procedimiento completo está en [docs/LLAVES.md](docs/LLAVES.md).
+- **Licencia de uso.** Al activar, la sucursal genera su propia llave (no exportable dentro del TPM 2.0 si lo hay; si no, una llave ligada a la huella de placa, disco y MAC). El Worker certifica esa llave con la intermedia de licencias junto con el plan, las funciones y los límites. Cada renovación firma un reto del servidor con esa llave, así que copiar la licencia a otro equipo no sirve.
 - **Gracia sin conexión.** Cada licencia incluye `offlineUntil`: 3 días desde la última validación. Una licencia vencida o revocada ya no se renueva y recibe un aviso firmado para la pantalla de bloqueo.
 - **Panel.** Cada cuenta es un dispositivo con su llave, más contraseña y TOTP. Las cuentas siguientes entran por invitación.
 - **Almacenamiento.** D1 para los datos y R2 para los paquetes. El Worker aplica sus migraciones (`migrations/`) solo, en la primera solicitud, porque el despliegue desde Git no escribe el ID de la base en el repositorio.
@@ -31,7 +35,17 @@ Lo que no se puede hacer desde el repositorio está marcado con **(tú)**.
    npm run keys
    ```
 
-   Crea `secrets/` (ignorada por Git) con `root-private.txt`, `admin-setup-code.txt` y `root-public.pem`. El script no sobrescribe una raíz existente: cambiarla obliga a reaprovisionar todas las sucursales.
+   Crea en `secrets/` (ignorada por Git) lo que falte: `root-private.txt`, `root-public.pem`, `challenge-key.txt` y `admin-setup-code.txt`. No sobrescribe nada: cambiar la raíz obliga a reaprovisionar todas las sucursales. Después firma las dos intermedias:
+
+   ```bash
+   node scripts/sign-intermediate.mjs --use license --generation 1
+   ```
+
+   ```bash
+   node scripts/sign-intermediate.mjs --use release --generation 1
+   ```
+
+   Duran 400 días; el panel muestra cuándo vence la de licencias.
 
 2. **(tú) Conecta el repositorio en Cloudflare:** Workers & Pages → Create → elige GitHub → repositorio `CulinaryServer`.
    - El nombre del Worker debe ser `culinary-server`, igual que `name` en `wrangler.jsonc`. Si no coincide, la compilación falla.
@@ -39,10 +53,12 @@ Lo que no se puede hacer desde el repositorio está marcado con **(tú)**.
    - Save and Deploy. El primer despliegue crea la base D1 `culinary-server` y el bucket R2 `culinary-server-packages`. R2 debe estar activado en la cuenta (Dashboard → R2, una sola vez); si no, el despliegue falla al crear el bucket.
 
 3. **(tú) Agrega los secretos:** el Worker → Settings → Variables and Secrets → Add, tipo **Secret**:
-   - `ROOT_PRIVATE_KEY`: el contenido de `secrets/root-private.txt`.
+   - `LICENSE_SIGNING_KEY`: el contenido de `secrets/license-g1-private.txt`.
+   - `LICENSE_SIGNING_CHAIN`: el contenido de `secrets/license-g1-chain.txt`.
+   - `CHALLENGE_KEY`: el contenido de `secrets/challenge-key.txt`.
    - `ADMIN_SETUP_CODE`: el contenido de `secrets/admin-setup-code.txt`.
 
-   Pulsa Deploy. Sin `ROOT_PRIVATE_KEY`, los retos y todo lo que firma responden `503 server_misconfigured`.
+   La pública de la raíz va en `ROOT_PUBLIC_SPKI`, dentro de `vars` en `wrangler.jsonc` (no es secreta). Si migras desde la versión anterior, borra el secreto `ROOT_PRIVATE_KEY` del Worker. Pulsa Deploy. Sin estos valores, los retos y todo lo que firma responden `503 server_misconfigured`.
 
 4. **(tú) Si el panel corre en un navegador o en Tauri**, define la variable `ADMIN_ORIGINS` con sus orígenes separados por comas (por ejemplo `https://admin.ejemplo.com,http://tauri.localhost`). Si el panel llama desde código nativo, déjala vacía. Ojo: el valor de `wrangler.jsonc` reemplaza al del panel en cada despliegue desde Git, así que cámbialo en el archivo.
 
@@ -50,7 +66,7 @@ Lo que no se puede hacer desde el repositorio está marcado con **(tú)**.
 
 6. **Primer administrador:** en CulinaryAdmin, alta con el código de `admin-setup-code.txt`. Ese código deja de servir en cuanto existe un administrador activo; después puedes borrar el secreto `ADMIN_SETUP_CODE`.
 
-7. **(tú) Guarda `secrets/root-private.txt` fuera de línea** (por ejemplo en un gestor de contraseñas) y bórralo del equipo. Copia `secrets/root-public.pem` a la configuración de Culinary Restaurant: es la llave con la que verifica todo lo que firma el Worker. El panel también la muestra en `GET /admin/v1/root-key`.
+7. **(tú) Guarda `secrets/root-private.txt` y `secrets/release-g1-private.txt` fuera de línea** (por ejemplo en un gestor de contraseñas o una USB cifrada) y bórralos del equipo, junto con `license-g1-private.txt` una vez subido. Copia `secrets/root-public.pem` a la configuración de Culinary Restaurant: es la llave con la que verifica las intermedias. El panel también la muestra en `GET /admin/v1/root-key`.
 
 Cada push a `main` vuelve a desplegar. Las migraciones nuevas se agregan como `migrations/000N_nombre.sql` y en la lista de `src/db.ts`.
 
@@ -74,7 +90,7 @@ npm test
 npm run typecheck
 ```
 
-Las pruebas corren dentro del runtime de Workers con `@cloudflare/vitest-plugin` y una llave raíz desechable. Para `npm run dev`, crea `.dev.vars` con `ROOT_PRIVATE_KEY=...` y `ADMIN_SETUP_CODE=...`.
+Las pruebas corren dentro del runtime de Workers con `@cloudflare/vitest-plugin` y una cadena desechable (raíz, intermedia de licencias e intermedia de paquetes) que genera `vitest.config.ts`. Para `npm run dev`, crea `.dev.vars` con `LICENSE_SIGNING_KEY`, `LICENSE_SIGNING_CHAIN`, `CHALLENGE_KEY` y `ADMIN_SETUP_CODE` de una cadena de desarrollo, nunca la raíz.
 
 ## Decisiones que conviene revisar
 

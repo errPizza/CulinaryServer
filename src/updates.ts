@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { PLATFORMS, VERSION_PATTERN } from "./catalog";
-import { randomToken, rootKey, sha256Hex, signJws, toHex } from "./crypto";
+import { randomToken, sha256Hex, toHex } from "./crypto";
+import { keyFloor, RELEASE_USES, signJws, verifyChained } from "./keys";
 import { ApiError, bearerHash, uniqueOr409, type Ctx, type Env } from "./http";
 import { licenseStatus, type LicenseRow } from "./licenses";
 
@@ -22,6 +23,8 @@ export const completeSchema = z.strictObject({
 
 });
 
+export const manifestSchema = z.strictObject({ manifest: z.string().min(40).max(32768) });
+
 export const publicationSchema = z.strictObject({
 
   releaseId: z.string().min(1).max(64),
@@ -36,6 +39,7 @@ type ReleaseRow = {
   platform: string;
   filename: string;
   notes: string;
+  // "uploading" with upload_id NULL and a sha512 means: complete in R2, waiting for the offline release signature.
   status: "uploading" | "ready";
   upload_id: string | null;
   bytes: number | null;
@@ -49,7 +53,7 @@ const objectKey = (r: Pick<ReleaseRow, "id" | "filename">) => `releases/${r.id}/
 
 export function releaseView(r: ReleaseRow) {
 
-  return { id: r.id, version: r.version, platform: r.platform, filename: r.filename, notes: r.notes, status: r.status, bytes: r.bytes, sha512: r.sha512, manifest: r.manifest, createdAt: r.created_at };
+  return { id: r.id, version: r.version, platform: r.platform, filename: r.filename, notes: r.notes, status: r.status === "uploading" && r.sha512 ? "signing" : r.status, bytes: r.bytes, sha512: r.sha512, manifest: r.manifest, createdAt: r.created_at };
 }
 
 async function getRelease(db: D1Database, id: string): Promise<ReleaseRow> {
@@ -112,8 +116,6 @@ export async function completeRelease(env: Env, id: string, parts: z.infer<typeo
  
   const { row, upload } = await uploading(env, id);
   
-  await rootKey(env.ROOT_PRIVATE_KEY);
- 
   try {
 
     await upload.complete(parts);
@@ -133,20 +135,31 @@ export async function completeRelease(env: Env, id: string, parts: z.infer<typeo
   await object.body.pipeTo(digest);
   
   const sha512 = toHex(new Uint8Array(await digest.digest));
-  const manifest = await signJws(env.ROOT_PRIVATE_KEY, "culinary-release+jws", {
+  const signing = await env.DB.prepare("UPDATE release SET upload_id = NULL, bytes = ?, sha512 = ? WHERE id = ? RETURNING *").bind(object.size, sha512, id).first<ReleaseRow>();
 
-    releaseId: row.id,
-    version: row.version,
-    platform: row.platform,
-    filename: row.filename,
-    bytes: object.size,
-    sha512
+  return releaseView(signing!);
+}
 
-  });
+/** The release manifest comes signed from the provider station; it must describe exactly the bytes in R2. */
+export async function attachManifest(env: Env, id: string, manifest: string) {
 
-  const ready = await env.DB.prepare("UPDATE release SET status = 'ready', upload_id = NULL, bytes = ?, sha512 = ?, manifest = ? WHERE id = ? RETURNING *").bind(object.size, sha512, manifest, id).first<ReleaseRow>();
- 
-  return releaseView(ready!);
+  const row = await getRelease(env.DB, id);
+
+  if (row.status !== "uploading" || row.upload_id || !row.sha512) throw new ApiError(409, "conflict", "La versión no está esperando su firma");
+
+  const { payload, intermediate } = await verifyChained(env, manifest.trim(), RELEASE_USES[0]);
+
+  if (intermediate.generation < (await keyFloor(env)).release) throw new ApiError(400, "bad_request", "La llave intermedia de paquetes está revocada");
+
+  const expected = { releaseId: row.id, version: row.version, platform: row.platform, filename: row.filename, bytes: row.bytes, sha512: row.sha512 };
+
+  for (const [field, value] of Object.entries(expected)) if (payload[field] !== value) throw new ApiError(400, "bad_request", `La firma no corresponde al paquete (${field})`);
+
+  const ready = await env.DB.prepare("UPDATE release SET status = 'ready', manifest = ? WHERE id = ? AND status = 'uploading' RETURNING *").bind(manifest.trim(), id).first<ReleaseRow>();
+
+  if (!ready) throw new ApiError(409, "conflict", "La versión cambió mientras se firmaba");
+
+  return { release: releaseView(ready), kid: intermediate.kid };
 }
 
 export async function abortRelease(env: Env, id: string) {
@@ -252,7 +265,7 @@ export async function checkForUpdate(env: Env, license: LicenseRow, platform: st
  
   await env.DB.prepare("INSERT INTO download_grant (token_hash, license_id, release_id, expires_at) VALUES (?, ?, ?, ?)").bind(await sha256Hex(token), license.id, latest.id, expires).run();
  
-  const update = await signJws(env.ROOT_PRIVATE_KEY, "culinary-update+jws", {
+  const update = await signJws(env, "culinary-update+jws", {
 
     licenseId: license.id,
     siteId: license.site_id,
@@ -267,7 +280,7 @@ export async function checkForUpdate(env: Env, license: LicenseRow, platform: st
 
   });
 
-  return { update, release: latest.manifest, download: { path: `/branch/v1/downloads/${latest.id}`, token, expiresAt: new Date(expires).toISOString() } };
+  return { update, release: latest.manifest, keyFloor: (await keyFloor(env)).jws, download: { path: `/branch/v1/downloads/${latest.id}`, token, expiresAt: new Date(expires).toISOString() } };
 }
 
 export async function streamDownload(c: Ctx, releaseId: string): Promise<Response> {

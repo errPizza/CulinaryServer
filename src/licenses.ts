@@ -1,5 +1,7 @@
 import { OFFLINE_GRACE_MS, termEnd, TIER_TERMINALS, type Limits, type Plan, type Tier } from "./catalog";
-import { signJws, type KeyAlg } from "./crypto";
+import { type KeyAlg } from "./crypto";
+import { audit } from "./db";
+import { licenseSigner, signJws } from "./keys";
 import { ApiError, type Env } from "./http";
 
 export type LicenseRow = {
@@ -114,7 +116,7 @@ export async function licenseToken(env: Env, row: LicenseRow): Promise<string> {
   
   const validatedAt = row.validated_at!;
   
-  return signJws(env.ROOT_PRIVATE_KEY, "culinary-license+jws", {
+  const token = await signJws(env, "culinary-license+jws", {
 
     licenseId: row.id,
     revision: row.revision,
@@ -136,11 +138,15 @@ export async function licenseToken(env: Env, row: LicenseRow): Promise<string> {
     binding: row.binding_kind
 
   });
+
+  await audit(env.DB, null, "license.sign", row.id, { kid: (await licenseSigner(env)).kid, revision: row.revision });
+
+  return token;
 }
 
 export async function statusNotice(env: Env, row: LicenseRow, challenge: string): Promise<string> {
 
-  return signJws(env.ROOT_PRIVATE_KEY, "culinary-license-status+jws", {
+  return signJws(env, "culinary-license-status+jws", {
 
     licenseId: row.id,
     revision: row.revision,

@@ -14,7 +14,9 @@
   
   "vars": {
 
-    "ADMIN_ORIGINS": "http://tauri.localhost"
+    "ADMIN_ORIGINS": "http://tauri.localhost",
+    // Public half of the offline root (secrets/root-public.pem); verifies intermediates and the key floor.
+    "ROOT_PUBLIC_SPKI": "MCowBQYDK2VwAyEA-cb9-PZR6r_NBC4CmewxQMRdkx__Y3gOlULuW3gqizI"
 
   }
 

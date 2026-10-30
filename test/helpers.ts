@@ -54,14 +54,32 @@ export async function signed(scope: Scope, device: Device, subject: string, meth
   return call(method, path, { raw: options.body === undefined ? undefined : bytes, headers, token: options.token });
 }
 
-/** Verifies a compact JWS against the root public key the branch has embedded, and returns its payload. */
+const decodePart = (part: string) => JSON.parse(new TextDecoder().decode(fromBase64Url(part)));
+
+/** Verifies a compact JWS like the branch: root → intermediate in the `chain` header → document. Returns the payload. */
 export async function verifyJws(jws: string, typ: string): Promise<any> {
   const [header, payload, signature] = jws.split(".");
-  const key = await crypto.subtle.importKey("spki", fromBase64Url(env.ROOT_PUBLIC_SPKI), { name: "Ed25519" }, false, ["verify"]);
-  expect(await crypto.subtle.verify({ name: "Ed25519" }, key, fromBase64Url(signature!), utf8(`${header}.${payload}`))).toBe(true);
-  const decoded = JSON.parse(new TextDecoder().decode(fromBase64Url(header!)));
+  const decoded = decodePart(header!);
   expect(decoded).toMatchObject({ alg: "EdDSA", typ });
-  return JSON.parse(new TextDecoder().decode(fromBase64Url(payload!)));
+  let key = await crypto.subtle.importKey("spki", fromBase64Url(env.ROOT_PUBLIC_SPKI), { name: "Ed25519" }, false, ["verify"]);
+  if (decoded.chain) {
+    const cert = await verifyJws(decoded.chain, "culinary-intermediate+jws");
+    expect(cert.uses).toContain(typ);
+    expect(decoded.kid).toBe(cert.kid);
+    key = await crypto.subtle.importKey("raw", fromBase64Url(cert.key), { name: "Ed25519" }, false, ["verify"]);
+  }
+  expect(await crypto.subtle.verify({ name: "Ed25519" }, key, fromBase64Url(signature!), utf8(`${header}.${payload}`))).toBe(true);
+  return decodePart(payload!);
+}
+
+/** Signs like the offline station: with the root (no chain) or with an intermediate and its certificate. */
+export async function stationSign(pkcs8: string, typ: string, payload: Record<string, unknown>, chain?: string): Promise<string> {
+  const key = await crypto.subtle.importKey("pkcs8", fromBase64Url(pkcs8), { name: "Ed25519" }, true, ["sign"]);
+  const raw = fromBase64Url(((await crypto.subtle.exportKey("jwk", key)) as JsonWebKey).x!);
+  const kid = toBase64Url(new Uint8Array(await crypto.subtle.digest("SHA-256", raw))).slice(0, 16);
+  const header = toBase64Url(utf8(JSON.stringify({ alg: "EdDSA", typ, kid, ...(chain ? { chain } : {}) })));
+  const body = toBase64Url(utf8(JSON.stringify({ v: 1, ...payload, iat: new Date().toISOString() })));
+  return `${header}.${body}.${toBase64Url(new Uint8Array(await crypto.subtle.sign({ name: "Ed25519" }, key, utf8(`${header}.${body}`))))}`;
 }
 
 export const step = () => Math.floor(Date.now() / 30_000);

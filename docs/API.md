@@ -42,7 +42,7 @@ Cualquier otra ruta responde `404`. Todas las respuestas llevan `Cache-Control: 
 | 416 | `range_not_satisfiable` | Cabecera `Range` inválida o con varios rangos en una descarga. |
 | 429 | `rate_limited` | Demasiados tickets abiertos o cuenta del panel bloqueada. |
 | 500 | `internal` | Error no previsto. |
-| 503 | `server_misconfigured` | Falta o es inválido el secreto `ROOT_PRIVATE_KEY` (también lo usan los retos). |
+| 503 | `server_misconfigured` | Falta o es inválido `ROOT_PUBLIC_SPKI`, `LICENSE_SIGNING_KEY`, `LICENSE_SIGNING_CHAIN`, `CHALLENGE_KEY` o `KEY_FLOOR`, o la intermedia de licencias venció o quedó bajo el piso de llaves. |
 
 ## 2. Solicitudes firmadas con reto
 
@@ -113,10 +113,14 @@ La firma cubre los bytes ASCII de `base64url(header) + "." + base64url(payload)`
 | `culinary-license-status+jws` | Aviso de vencimiento o revocación (sección 4.4). |
 | `culinary-release+jws` | Manifiesto de un paquete, independiente de la licencia (sección 4.5). |
 | `culinary-update+jws` | Actualización dirigida a una licencia (sección 4.5). |
+| `culinary-intermediate+jws` | Certificado de una llave intermedia, firmado por la raíz: `kid`, `key` (32 bytes base64url), `uses` (tipos que puede firmar), `generation`, `nbf`, `exp`. |
+| `culinary-key-floor+jws` | Piso de llaves, firmado por la raíz: `license` y `release`, la generación mínima vigente de cada intermedia. |
+
+La raíz sólo firma intermedias y el piso de llaves. Los demás documentos los firma una intermedia y llevan su certificado en el encabezado: `{ "alg": "EdDSA", "typ", "kid": <kid de la intermedia>, "chain": <JWS culinary-intermediate+jws> }`. Los documentos que la raíz firmó antes de las intermedias no traen `chain` y siguen valiendo.
 
 Al verificar, la sucursal debe:
 
-1. Verificar la firma con la llave pública raíz **aprovisionada en el equipo**, nunca con una recibida por red. El panel la muestra en `GET /admin/v1/root-key`; `kid` sirve solo para detectar una raíz distinta.
+1. Verificar la firma con la llave pública raíz **aprovisionada en el equipo**, nunca con una recibida por red. El panel la muestra en `GET /admin/v1/root-key`; `kid` sirve solo para detectar una raíz distinta. Con `chain`: verificar el certificado con la raíz, que su `kid` sea el SHA-256 de `key` y el del encabezado, que `uses` incluya el `typ`, que `generation` no esté bajo el piso de llaves guardado y que el `iat` del documento caiga entre `nbf` y `exp`; después verificar el documento con `key`.
 2. Comprobar que `alg` es `EdDSA` y que `typ` es el esperado para ese uso. Un documento de un tipo no vale como otro.
 3. Rechazar un payload con `v` distinto de `1`.
 
@@ -158,7 +162,7 @@ Sin TPM: `"binding": { "kind": "fingerprint", "fingerprint": { "board": "<hex64>
 El código no distingue mayúsculas, guiones ni espacios. Respuesta `200`:
 
 ```json
-{ "license": "<JWS culinary-license+jws>" }
+{ "license": "<JWS culinary-license+jws>", "keyFloor": "<JWS culinary-key-floor+jws>" | null }
 ```
 
 El código sirve una sola vez. El plazo de la prueba, mensual o anual empieza en este momento, salvo que el panel haya fijado `expiresAt` antes. Si la activación se rechaza (licencia vencida, `503`), el código no se gasta y la llave no queda ligada. Lo mismo si `siteId` no es el de la licencia: `409 site_mismatch`, con el siteId esperado en el mensaje.
@@ -220,7 +224,7 @@ Reglas que la sucursal hace cumplir del lado de su servidor:
 { "fingerprint": { "board": "<hex64>", "disk": "<hex64>", "mac": "<hex64>" } }
 ```
 
-Con TPM, cuerpo `{}`. Respuesta `200`: `{ "license": "<JWS culinary-license+jws>" }` con `validatedAt` nuevo.
+Con TPM, cuerpo `{}`. Respuesta `200`: `{ "license": "<JWS culinary-license+jws>", "keyFloor" }` con `validatedAt` nuevo. La sucursal guarda el piso de llaves más alto que reciba.
 
 Una licencia vencida o revocada no se renueva: `403` con `code` `license_expired` o `license_revoked` y `notice`, un JWS `culinary-license-status+jws`:
 
@@ -259,6 +263,7 @@ Otros errores: `401` (firma o reto), `403 binding_mismatch`, `409 conflict` si l
 {
   "update": "<JWS culinary-update+jws>",
   "release": "<JWS culinary-release+jws>",
+  "keyFloor": "<JWS culinary-key-floor+jws>" | null,
   "download": {
     "path": "/branch/v1/downloads/5f1d0c9a-6a7e-4b1e-8d0b-2b7c1e9f4a33",
     "token": "<base64url>",
@@ -266,6 +271,8 @@ Otros errores: `401` (firma o reto), `403 binding_mismatch`, `409 conflict` si l
   }
 }
 ```
+
+La autorización (`update`, intermedia de licencias) y el manifiesto (`release`, intermedia de paquetes) se verifican por separado y deben coincidir en `releaseId`, `version`, `platform`, `filename`, `bytes` y `sha512`; así el Worker por sí solo no puede autorizar otros bytes.
 
 Payload de `culinary-update+jws`:
 
@@ -385,7 +392,7 @@ El panel muestra `uri` como código QR una sola vez. TOTP: RFC 6238, SHA-1, 6 d�
 | `POST /admin/v1/invites` | `201 { "code": "XXXXX-XXXXX-XXXXX-XXXXX", "expiresAt" }` |
 | `GET /admin/v1/admins` | `{ "admins": [{ "id", "username", "deviceName", "keyAlg", "active", "createdAt" }] }` |
 | `DELETE /admin/v1/admins/{id}` | `{ "ok": true }`; no permite borrarse a sí mismo |
-| `GET /admin/v1/root-key` | `{ "kid", "alg": "EdDSA", "publicKey": "<32 bytes base64url>", "spki", "pem" }` |
+| `GET /admin/v1/root-key` | `{ "kid", "alg": "EdDSA", "publicKey": "<32 bytes base64url>", "spki", "pem", "licenseIntermediate": { "kid", "generation", "notBefore", "expiresAt" } \| null, "keyFloor": { "license", "release" } \| null }` |
 | `GET /admin/v1/audit?before=<id>` | `{ "entries": [{ "id", "at", "adminId", "action", "target", "detail" }] }`, 100 por página |
 
 ### 5.2 Licencias
@@ -452,7 +459,8 @@ Subida a R2 por partes, para paquetes de cualquier tamaño:
 
 1. `POST /admin/v1/releases` con `{ "version": "1.4.0", "platform": "linux-x64", "filename": "culinary-1.4.0.deb", "notes": "..." }` → `201 { "release": Versión }` en estado `uploading`. `filename`: `^[A-Za-z0-9][A-Za-z0-9._-]{0,150}\.(exe|deb|apk)$`, con la extensión de la plataforma (`linux-x64` → `.deb`, `win-x64` → `.exe`, `android-arm64` → `.apk`); `version`: `x.y.z` (hasta 5 dígitos por parte), única por plataforma.
 2. `PUT /admin/v1/releases/{id}/parts/{n}` con los bytes crudos y `Content-Length`, `n` de 1 a 10000 → `{ "partNumber", "etag" }`. Todas las partes salvo la última deben medir al menos 5 MiB, y ninguna puede pasar del límite de cuerpo del plan de Workers (100 MB en Free y Pro). Un paquete pequeño cabe en una sola parte.
-3. `POST /admin/v1/releases/{id}/complete` con `{ "parts": [{ "partNumber": 1, "etag": "..." }] }` → el Worker calcula el SHA-512 de lo que quedó en R2 y firma el manifiesto. `{ "release": Versión }` en estado `ready`.
+3. `POST /admin/v1/releases/{id}/complete` con `{ "parts": [{ "partNumber": 1, "etag": "..." }] }` → el Worker calcula el SHA-512 de lo que quedó en R2. `{ "release": Versión }` en estado `signing`, sin `manifest`.
+4. `PUT /admin/v1/releases/{id}/manifest` con `{ "manifest": "<JWS culinary-release+jws>" }`, firmado en la estación con la intermedia de paquetes (`scripts/sign-release.mjs`). El Worker comprueba la cadena y que `releaseId`, `version`, `platform`, `filename`, `bytes` y `sha512` coincidan con lo subido → `{ "release": Versión }` en estado `ready`. Sólo una versión `ready` se puede publicar.
 
 `DELETE /admin/v1/releases/{id}` cancela una subida sin terminar.
 

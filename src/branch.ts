@@ -1,7 +1,8 @@
 import { Hono } from "hono";
 import { z } from "zod";
 import { PLATFORMS, termEnd } from "./catalog";
-import { hashHumanCode, publicKeySchema, rootKey, sameSecret } from "./crypto";
+import { hashHumanCode, publicKeySchema, sameSecret } from "./crypto";
+import { keyFloor, licenseSigner } from "./keys";
 import { ApiError, parseJson, readJson, uniqueOr409, type App, type Ctx } from "./http";
 import { findLicense, licenseToken, requireUsable, type LicenseRow } from "./licenses";
 import { issueChallenge, readSigned, verifySigned } from "./signature";
@@ -70,7 +71,7 @@ branch.post("/activate", async (c) => {
   // Checked before anything is written, so a branch with another siteId neither spends the code nor binds its key.
   if (input.siteId !== license.site_id) throw new ApiError(409, "site_mismatch", `La licencia es de la sucursal ${license.site_id}, no de ${input.siteId}`);
 
-  await rootKey(c.env.ROOT_PRIVATE_KEY);
+  await licenseSigner(c.env);
 
   const at = new Date();
   const expiresAt = license.expires_at ?? termEnd(license.plan, license.trial_days, at)?.toISOString() ?? null;
@@ -82,7 +83,7 @@ branch.post("/activate", async (c) => {
  
   if (!updated) throw invalid;
  
-  return c.json({ license: await licenseToken(c.env, updated) });
+  return c.json({ license: await licenseToken(c.env, updated), keyFloor: (await keyFloor(c.env)).jws });
 });
 
 branch.post("/license/renew", async (c) => {
@@ -105,7 +106,7 @@ branch.post("/license/renew", async (c) => {
 
   }
 
-  return c.json({ license: await licenseToken(c.env, renewed) });
+  return c.json({ license: await licenseToken(c.env, renewed), keyFloor: (await keyFloor(c.env)).jws });
 });
 
 branch.post("/updates/check", async (c) => {
