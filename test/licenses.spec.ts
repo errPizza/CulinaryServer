@@ -200,11 +200,31 @@ describe("edición desde el panel", () => {
     const { license, activationCode } = await createLicense(token);
     const old = await newDevice();
     await json(await activate(license, activationCode, old), 200);
-    const reset = await json(await call("POST", `/admin/v1/licenses/${license.id}/reset-activation`, { token }), 200);
+    expect((await call("POST", `/admin/v1/licenses/${license.id}/reset-activation`, { token, body: { reason: " " } })).status).toBe(400);
+    const reset = await json(await call("POST", `/admin/v1/licenses/${license.id}/reset-activation`, { token, body: { reason: "Falló la placa" } }), 200);
+    const nonce = await challenge("branch", license.id);
+    const { error } = await json(await renew(old, license.id, { fingerprint }, nonce), 403);
+    expect(error.code).toBe("license_transferred");
+    expect(await verifyJws(error.notice, "culinary-license-status+jws")).toMatchObject({ status: "transferred", challenge: nonce, licenseId: license.id });
     const replacement = await newDevice("ES256");
     await json(await activate(license, reset.activationCode, replacement, { kind: "tpm" }), 200);
-    expect((await renew(old, license.id)).status).toBe(401);
+    expect((await json(await renew(old, license.id), 403)).error.code).toBe("license_transferred");
     await json(await renew(replacement, license.id, {}), 200);
+    expect((await renew(await newDevice(), license.id)).status).toBe(401);
+    const { entries } = await json(await call("GET", "/admin/v1/audit", { token }), 200);
+    expect(entries.find((e: any) => e.action === "license.reset_activation").detail).toMatchObject({ reason: "Falló la placa", binding: "fingerprint" });
+  });
+
+  it("dos reparaciones separadas no dejan fuera a la sucursal, y dos piezas a la vez sí", async () => {
+    const { token } = await firstAdmin();
+    const { device, license } = await activatedBranch(token);
+    const mac = { ...fingerprint, mac: "d".repeat(64) };
+    await json(await renew(device, license.id, { fingerprint: mac }), 200);
+    const disk = { ...mac, disk: "e".repeat(64) };
+    await json(await renew(device, license.id, { fingerprint: disk }), 200);
+    expect((await json(await renew(device, license.id, { fingerprint }), 403)).error.code).toBe("binding_mismatch");
+    const { entries } = await json(await call("GET", "/admin/v1/audit", { token }), 200);
+    expect(entries.filter((e: any) => e.action === "license.hardware_change").map((e: any) => e.detail.parts).flat().sort()).toEqual(["disk", "mac"]);
   });
 
   it("no repite siteId y valida los días de prueba", async () => {
@@ -244,7 +264,7 @@ describe("siteId y eliminación desde el panel", () => {
     expect((await activate(license, activationCode, await newDevice())).status).toBe(409);
     await json(await activate(moved.license, activationCode, await newDevice()), 200);
     expect((await call("PATCH", `/admin/v1/licenses/${license.id}`, { token, body: { siteId: "sitio-otro" } })).status).toBe(409);
-    const reset = await json(await call("POST", `/admin/v1/licenses/${license.id}/reset-activation`, { token }), 200);
+    const reset = await json(await call("POST", `/admin/v1/licenses/${license.id}/reset-activation`, { token, body: { reason: "Cambio de servidor" } }), 200);
     expect((await json(await call("PATCH", `/admin/v1/licenses/${license.id}`, { token, body: { siteId: "sitio-otro" } }), 200)).license.siteId).toBe("sitio-otro");
     expect(reset.activationCode).toBeTruthy();
   });

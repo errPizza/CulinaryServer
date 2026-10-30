@@ -95,7 +95,9 @@ Las pruebas corren dentro del runtime de Workers con `@cloudflare/vitest-plugin`
 ## Decisiones que conviene revisar
 
 - **El plazo empieza al activar**, también en mensual y anual. El panel puede fijar `expiresAt` antes de activar si el cobro empezó otro día.
-- **Huella sin TPM:** basta con que coincidan dos de tres partes (placa, disco, MAC), para que cambiar una pieza no bloquee la sucursal. Con dos cambios, el proveedor libera el equipo desde el panel.
+- **Huella sin TPM:** basta con que coincidan dos de tres partes (placa, disco, MAC), para que cambiar una pieza no bloquee la sucursal. Cada cambio aceptado actualiza la huella guardada y queda en la auditoría (`license.hardware_change`). Con dos cambios a la vez, el proveedor libera el equipo desde el panel.
+- **La huella es una señal, no un secreto.** Son identificadores que cualquiera con acceso al equipo puede leer o imitar. Lo que liga la licencia es la llave privada; la huella sólo detecta que esa llave se copió a otra máquina.
+- **Una transferencia sólo recuerda el último equipo liberado.** Ese equipo recibe un aviso firmado y se bloquea en su siguiente contacto. Uno liberado antes, o uno sin internet, se bloquea solo al terminar la gracia.
 - **TPM sin atestación:** el Worker registra la llave pública que la sucursal declara como del TPM (exige que sea P-256), pero no verifica el certificado de respaldo (EK) del fabricante.
 - **La huella de hardware solo se revisa al renovar.** Las demás rutas de la sucursal confían en la firma de la llave. Una llave copiada a otro equipo deja de renovar, y a los 7 días la licencia se bloquea sola.
 - **El registro mTLS no prueba la posesión del certificado.** Una sucursal con licencia podría registrar primero la huella del certificado de otra; la verdadera recibiría `409`. El proveedor lo ve en `GET /admin/v1/registry` y lo corrige liberando el equipo.

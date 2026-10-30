@@ -4,8 +4,9 @@ import { PLATFORMS, termEnd } from "./catalog";
 import { hashHumanCode, publicKeySchema, sameSecret } from "./crypto";
 import { keyFloor, licenseSigner } from "./keys";
 import { ApiError, parseJson, readJson, uniqueOr409, type App, type Ctx } from "./http";
-import { findLicense, licenseToken, requireUsable, type LicenseRow } from "./licenses";
-import { issueChallenge, readSigned, verifySigned } from "./signature";
+import { audit } from "./db";
+import { findLicense, licenseToken, requireUsable, statusNotice, type LicenseRow } from "./licenses";
+import { consumeChallenge, issueChallenge, readSigned, signedBy, verifySigned } from "./signature";
 import { addTicketMessage, branchTickets, createTicket } from "./tickets";
 import { checkForUpdate, streamDownload } from "./updates";
 
@@ -33,10 +34,17 @@ async function authenticate(c: Ctx): Promise<Authenticated> {
   const request = await readSigned(c);
   const license = await findLicense(c.env.DB, request.subject);
 
-  if (!license?.key_alg || !license.key_spki) throw unauthorized();
-  if (!(await verifySigned(c, "branch", request, license.key_alg, license.key_spki))) throw unauthorized();
+  if (!license || !(license.key_spki || license.released_spki)) throw unauthorized();
+  if (!(await consumeChallenge(c.env, "branch", request.subject, request.nonce))) throw unauthorized();
+  if (license.key_alg && license.key_spki && await signedBy(c, "branch", request, license.key_alg, license.key_spki)) return { license, body: request.body, challenge: request.nonce };
+  // The machine it was released from locks on its next contact instead of selling through the offline grace.
+  if (license.released_alg && license.released_spki && await signedBy(c, "branch", request, license.released_alg, license.released_spki)) {
 
-  return { license, body: request.body, challenge: request.nonce };
+    throw new ApiError(403, "license_transferred", "La licencia pasó a otro equipo", { notice: await statusNotice(c.env, license, request.nonce, "transferred") });
+
+  }
+
+  throw unauthorized();
 }
 
 function sameHardware(license: LicenseRow, fingerprint: z.infer<typeof fingerprintSchema> | undefined): boolean {
@@ -96,8 +104,11 @@ branch.post("/license/renew", async (c) => {
   if (!sameHardware(license, input.fingerprint)) throw new ApiError(403, "binding_mismatch", "La licencia está ligada a otro equipo");
 
   const now = new Date().toISOString();
-  const renewed = await c.env.DB.prepare("UPDATE license SET validated_at = ?1 WHERE id = ?2 AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?1) RETURNING *").bind(now, license.id).first<LicenseRow>();
-  
+  // The stored fingerprint follows an accepted change; otherwise two repairs a year apart would add up to a foreign machine.
+  const fp = license.binding_kind === "fingerprint" ? input.fingerprint : undefined;
+  const changed = fp ? (["board", "disk", "mac"] as const).filter((part) => license[`fp_${part}`] !== fp[part]) : [];
+  const renewed = await c.env.DB.prepare("UPDATE license SET validated_at = ?1, fp_board = COALESCE(?3, fp_board), fp_disk = COALESCE(?4, fp_disk), fp_mac = COALESCE(?5, fp_mac) WHERE id = ?2 AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?1) RETURNING *").bind(now, license.id, fp?.board ?? null, fp?.disk ?? null, fp?.mac ?? null).first<LicenseRow>();
+
   if (!renewed) {
 
     await requireUsable(c.env, (await findLicense(c.env.DB, license.id))!, { challenge });
@@ -105,6 +116,8 @@ branch.post("/license/renew", async (c) => {
     throw new ApiError(409, "conflict", "La licencia cambió durante la renovación; reintenta");
 
   }
+
+  if (changed.length) await audit(c.env.DB, null, "license.hardware_change", license.id, { parts: changed });
 
   return c.json({ license: await licenseToken(c.env, renewed), keyFloor: (await keyFloor(c.env)).jws });
 });

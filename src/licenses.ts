@@ -30,7 +30,9 @@ export type LicenseRow = {
   fp_board: string | null;
   fp_disk: string | null;
   fp_mac: string | null;
-  validated_at: string | null;
+  released_alg: KeyAlg | null;
+  released_spki: string | null;
+validated_at: string | null;
   central_cert_sha256: string | null;
   deleted_at: string | null;
 
@@ -144,14 +146,14 @@ export async function licenseToken(env: Env, row: LicenseRow): Promise<string> {
   return token;
 }
 
-export async function statusNotice(env: Env, row: LicenseRow, challenge: string): Promise<string> {
+export async function statusNotice(env: Env, row: LicenseRow, challenge: string, status: LicenseStatus | "transferred" = licenseStatus(row)): Promise<string> {
 
   return signJws(env, "culinary-license-status+jws", {
 
     licenseId: row.id,
     revision: row.revision,
     siteId: row.site_id,
-    status: licenseStatus(row),
+    status,
     plan: row.plan,
     tier: row.tier,
     addons: addons(row),

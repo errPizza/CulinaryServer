@@ -195,12 +195,13 @@ admin.post("/licenses/:id/revoke", async (c) => {
 
 admin.post("/licenses/:id/reset-activation", async (c) => {
 
+  const input = await readJson(c, z.strictObject({ reason: z.string().trim().min(1).max(500) }));
   const row = await editable(c.env.DB, c.req.param("id"));
-  const activation = await issueHumanCode();
-  const updated = await c.env.DB.prepare(`UPDATE license SET activation_code_hash = ?, key_alg = NULL, key_spki = NULL, binding_kind = NULL, fp_board = NULL, fp_disk = NULL, fp_mac = NULL, central_cert_sha256 = NULL, revision = revision + 1 WHERE id = ? RETURNING *`).bind(activation.hash, row.id).first<LicenseRow>();
+const activation = await issueHumanCode();
+  const updated = await c.env.DB.prepare(`UPDATE license SET activation_code_hash = ?, released_alg = COALESCE(key_alg, released_alg), released_spki = COALESCE(key_spki, released_spki), key_alg = NULL, key_spki = NULL, binding_kind = NULL, fp_board = NULL, fp_disk = NULL, fp_mac = NULL, central_cert_sha256 = NULL, revision = revision + 1 WHERE id = ? RETURNING *`).bind(activation.hash, row.id).first<LicenseRow>();
  
-  await audit(c.env.DB, c.var.admin.id, "license.reset_activation", row.id);
- 
+  await audit(c.env.DB, c.var.admin.id, "license.reset_activation", row.id, { reason: input.reason, binding: row.binding_kind, spki: row.key_spki });
+
   return c.json({ license: licenseView(updated!), activationCode: activation.code });
 });
 

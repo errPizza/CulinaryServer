@@ -36,7 +36,7 @@ export async function issueChallenge(env: Env, scope: Scope, subject: string): P
   return { nonce: toBase64Url(new Uint8Array([...new Uint8Array(head.buffer), ...random, ...mac])), expiresAt: new Date(expires).toISOString() };
 }
 
-async function consumeChallenge(env: Env, scope: Scope, subject: string, nonce: string): Promise<boolean> {
+export async function consumeChallenge(env: Env, scope: Scope, subject: string, nonce: string): Promise<boolean> {
  
   const bytes = fromBase64Url(nonce);
   
@@ -75,9 +75,12 @@ export async function signingInput(scope: Scope, method: string, path: string, s
 }
 
 export async function verifySigned(c: Ctx, scope: Scope, request: SignedRequest, alg: KeyAlg, spki: string): Promise<boolean> {
- 
-  if (!(await consumeChallenge(c.env, scope, request.subject, request.nonce))) return false;
- 
+
+  return await consumeChallenge(c.env, scope, request.subject, request.nonce) && signedBy(c, scope, request, alg, spki);
+}
+
+export async function signedBy(c: Ctx, scope: Scope, request: SignedRequest, alg: KeyAlg, spki: string): Promise<boolean> {
+
   const url = new URL(c.req.url);
   const input = await signingInput(scope, c.req.method, url.pathname + url.search, request.subject, request.nonce, request.body);
   

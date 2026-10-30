@@ -36,6 +36,7 @@ Cualquier otra ruta responde `404`. Todas las respuestas llevan `Cache-Control: 
 | 403 | `license_expired` | Licencia vencida. Incluye `notice`. |
 | 403 | `license_revoked` | Licencia revocada. Incluye `notice`. |
 | 403 | `binding_mismatch` | La huella de hardware no coincide con la del equipo activado. |
+| 403 | `license_transferred` | La firma es de un equipo ya liberado. Trae un aviso firmado con `status: "transferred"`, y la sucursal se bloquea. |
 | 404 | `not_found` | Ruta o registro inexistente. |
 | 409 | `conflict` | Estado incompatible (siteId repetido, versión repetida, licencia revocada, etc.). |
 | 413 | `too_large` | Cuerpo mayor al límite. |
@@ -449,7 +450,7 @@ Licencia en el panel:
 | `DELETE /admin/v1/licenses/{id}` | | `{ "ok": true }`. La quita del panel: deja de salir en las listas y `GET`/`PATCH`/acciones dan `404`. Antes la revoca (la sucursal se bloquea en su siguiente contacto) y libera su `siteId` y su certificado mTLS para otra licencia. La fila se conserva para tickets, publicaciones y bitácora (`license.delete` guarda el `siteId` original). |
 | `POST /admin/v1/licenses/{id}/renew` | `{}` o `{ "until": "<ISO futuro>" }` | Sin `until`, suma un periodo (mes, año o `trialDays`) al vencimiento vigente o a ahora, lo que sea posterior. `409` en `permanent`, revocada o sin activar. |
 | `POST /admin/v1/licenses/{id}/revoke` | `{ "reason": "≤500" }` | Revocación definitiva. |
-| `POST /admin/v1/licenses/{id}/reset-activation` | | Libera el equipo (borra llave, huella y registro mTLS) y devuelve `{ "license", "activationCode" }` nuevo. |
+| `POST /admin/v1/licenses/{id}/reset-activation` | `reason` (1 a 500 caracteres) | Transferencia: libera el equipo (borra huella y registro mTLS, y guarda su llave para avisarle), audita motivo y llave, y devuelve `{ "license", "activationCode" }` nuevo. El equipo liberado se bloquea en su siguiente contacto. |
 
 Cada cambio sube `revision`; la sucursal lo recibe en su siguiente renovación. Una licencia revocada no admite cambios (`409`).
 
