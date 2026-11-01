@@ -5,10 +5,11 @@ import { hashHumanCode, publicKeySchema, sameSecret } from "./crypto";
 import { keyFloor, licenseSigner } from "./keys";
 import { ApiError, parseJson, readJson, uniqueOr409, type App, type Ctx } from "./http";
 import { audit } from "./db";
+import { faultsSchema, recordFaults } from "./faults";
 import { findLicense, licenseToken, requireUsable, statusNotice, type LicenseRow } from "./licenses";
 import { consumeChallenge, issueChallenge, readSigned, signedBy, verifySigned } from "./signature";
 import { addTicketMessage, branchTickets, createTicket } from "./tickets";
-import { checkForUpdate, streamDownload } from "./updates";
+import { checkForUpdate, latestReleases, streamDownload } from "./updates";
 
 const hex64 = z.string().regex(/^[0-9a-f]{64}$/, "SHA-256 en hexadecimal minúsculo");
 const fingerprintSchema = z.strictObject({ board: hex64, disk: hex64, mac: hex64 });
@@ -132,6 +133,16 @@ branch.post("/updates/check", async (c) => {
   return c.json(await checkForUpdate(c.env, license, input.platform, input.currentVersion));
 });
 
+// What the branch announces to its managers. It reveals no package and issues no download permission.
+branch.post("/updates/latest", async (c) => {
+
+  const { license, challenge } = await authenticate(c);
+
+  await requireUsable(c.env, license, { challenge });
+
+  return c.json({ releases: await latestReleases(c.env, license) });
+});
+
 branch.get("/downloads/:releaseId", (c) => streamDownload(c, c.req.param("releaseId")));
 
 branch.get("/tickets", async (c) => {
@@ -161,6 +172,17 @@ branch.post("/tickets/:id/messages", async (c) => {
   await requireUsable(c.env, license, { allowExpired: true, challenge });
 
   return c.json({ ticket: await addTicketMessage(c.env.DB, c.req.param("id"), { kind: "branch", licenseId: license.id }, input.message) }, 201);
+});
+
+// A branch with an expired license is still a branch that can fail, and is the one most likely to call about it.
+branch.post("/faults", async (c) => {
+
+  const { license, body, challenge } = await authenticate(c);
+  const input = parseJson(faultsSchema, body);
+
+  await requireUsable(c.env, license, { allowExpired: true, challenge });
+
+  return c.json(await recordFaults(c.env.DB, license.id, input.faults));
 });
 
 branch.put("/registry", async (c) => {

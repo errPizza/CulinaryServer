@@ -304,6 +304,8 @@ Antes de instalar, la sucursal comprueba:
 2. La versión es mayor que la instalada.
 3. El tamaño y el SHA-512 del archivo descargado coinciden con `bytes` y `sha512`.
 
+Sin pedir permiso de descarga, `POST /branch/v1/updates/latest` (solicitud firmada, cuerpo `{}`) responde `{ "releases": { "linux-x64": { "version", "notes" }, ... } }`: la versión más nueva publicada a esa licencia por plataforma, sin importar la instalada. Culinary Restaurant la consulta cada 15 minutos para avisar a sus gerentes.
+
 ### 4.6 Soporte
 
 Firmadas con la llave de la licencia. Se permiten con licencia vencida (para pedir la renovación), no con revocada.
@@ -337,6 +339,25 @@ Firmadas con la llave de la licencia. Se permiten con licencia vencida (para ped
 ```
 
 Respuesta `200`: `{ "siteId": "...", "tenantId": "...", "centralCertificateSha256": "..." }`. `409` si otra sucursal ya registró ese certificado. Liberar el equipo desde el panel borra el registro.
+
+### 4.8 Fallos
+
+`POST /branch/v1/faults` (solicitud firmada; funciona con la licencia vencida) con `{ "faults": [Fault] }`, de 1 a 20. Responde `{ "received": n }`. La sucursal quita de cada texto lo que no debe salir de ella (contraseñas, tokens, correos, números largos, cadenas de consulta) antes de enviarlo.
+
+| Campo | Contenido |
+|---|---|
+| `fingerprint` | SHA-256 en hexadecimal: identifica el fallo dentro de la licencia |
+| `source` | `api`, `worker`, `client`, `web` o `kiosk` |
+| `severity` | `error` o `critical` |
+| `what` | Qué falló, ≤300 |
+| `affected` | Qué afectó, ≤300 |
+| `detail` | Traza o salida de la aplicación, ≤8000 |
+| `context` | Hasta 16 pares de texto: ruta, operación, pantalla, rol, sistema |
+| `version`, `platform` | ≤32 |
+| `occurrences` | Veces que ocurrió desde el último envío |
+| `firstAt`, `lastAt` | ISO 8601 |
+
+Repetir `fingerprint` suma `occurrences`, actualiza `detail`, `context` y `version`, y reabre el fallo si estaba resuelto. Con 500 fallos abiertos en una licencia, los conocidos se siguen contando y los nuevos se descartan.
 
 ## 5. CulinaryAdmin (`/admin/v1`)
 
@@ -505,3 +526,14 @@ Subida a R2 por partes, para paquetes de cualquier tamaño:
 ```
 
 Cada fila trae los campos de sucursal del archivo `--provision-tenant` de `MesaNexo.Central` (`tenantId`, `branchId`, `siteId`, `slug`, `certificateSha256`, `tenantName`, `branchName`). Las credenciales del dueño no pasan por este Worker.
+
+### 5.6 Fallos
+
+| Ruta | Respuesta |
+|---|---|
+| `GET /admin/v1/faults?status=open` | `{ "faults": [Fault] }`, los 200 vistos más recientemente. `status`: `open` o `resolved`; sin él, ambos |
+| `POST /admin/v1/faults/{id}/resolve` | `{ "fault": Fault }`, queda en la bitácora |
+| `POST /admin/v1/faults/{id}/reopen` | `{ "fault": Fault }`, queda en la bitácora |
+
+`Fault` lleva los campos de §4.8 menos `fingerprint`, más `id`, `licenseId`, `customer`, `branchName`, `siteId`, `status`, `resolvedAt` y `resolvedBy`. Los resueltos se borran a los 90 días.
+

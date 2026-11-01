@@ -35,6 +35,23 @@ const check = (branch: Awaited<ReturnType<typeof activatedBranch>>, currentVersi
   signedBranch(branch, "POST", "/branch/v1/updates/check", { platform: "linux-x64", currentVersion });
 
 describe("actualizaciones", () => {
+  it("la sucursal sabe qué versión se publicó para ella, sin permiso de descarga", async () => {
+    const { token } = await firstAdmin();
+    const branch = await activatedBranch(token), other = await activatedBranch(token);
+    const latest = async (b: typeof branch) => (await json(await signedBranch(b, "POST", "/branch/v1/updates/latest", {}), 200)).releases;
+    expect(await latest(branch)).toEqual({});
+
+    const older = await uploadRelease(token, "1.4.0"), newer = await uploadRelease(token, "1.10.0");
+    await publishTo(token, older.id, "all");
+    const targeted = await publishTo(token, newer.id, { licenseIds: [branch.license.id] });
+    expect(await latest(branch)).toEqual({ "linux-x64": { version: "1.10.0", notes: "Corrige impresión" } });
+    expect(await latest(other)).toEqual({ "linux-x64": { version: "1.4.0", notes: "Corrige impresión" } });
+
+    await json(await call("POST", `/admin/v1/publications/${targeted.id}/withdraw`, { token, body: {} }), 200);
+    expect((await latest(branch))["linux-x64"].version).toBe("1.4.0");
+    expect((await env.DB.prepare("SELECT COUNT(*) AS n FROM download_grant").first<number>("n"))).toBe(0);
+  });
+
   it("espera la firma de la estación con el SHA-512 de lo que quedó en R2 y no se publica antes", async () => {
     const { token } = await firstAdmin();
     const pending = await completeUpload(token);

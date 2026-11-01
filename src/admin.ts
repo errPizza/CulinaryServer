@@ -5,6 +5,7 @@ import { addonsSchema, featuresSchema, limitsSchema, PLANS, termEnd, TIERS, type
 import { ed25519Spki, issueHumanCode, toBase64Url } from "./crypto";
 import { keyFloor, licenseSigner, rootPublic } from "./keys";
 import { audit } from "./db";
+import { adminFaults, FAULT_STATUSES, reopenFault, resolveFault } from "./faults";
 import { ApiError, parse, readJson, uniqueOr409, type App } from "./http";
 import { features, getLicense, LICENSE_STATUSES, licenseStatus, licenseView, nextExpiry, type LicenseRow } from "./licenses";
 import { addTicketMessage, adminTickets, closeTicket, ticketDetail, TICKET_STATUSES } from "./tickets";
@@ -291,6 +292,26 @@ admin.post("/publications/:id/withdraw", async (c) => {
   await audit(c.env.DB, c.var.admin.id, "publication.withdraw", c.req.param("id"));
   
   return c.json({ ok: true });
+});
+
+admin.get("/faults", async (c) => c.json({ faults: await adminFaults(c.env.DB, parse(z.strictObject({ status: z.enum(FAULT_STATUSES).optional() }), c.req.query()).status) }));
+
+admin.post("/faults/:id/resolve", async (c) => {
+
+  const fault = await resolveFault(c.env.DB, c.req.param("id"), c.var.admin.id);
+
+  await audit(c.env.DB, c.var.admin.id, "fault.resolve", fault.id, { what: fault.what, version: fault.version });
+
+  return c.json({ fault });
+});
+
+admin.post("/faults/:id/reopen", async (c) => {
+
+  const fault = await reopenFault(c.env.DB, c.req.param("id"));
+
+  await audit(c.env.DB, c.var.admin.id, "fault.reopen", fault.id);
+
+  return c.json({ fault });
 });
 
 admin.get("/tickets", async (c) => c.json({ tickets: await adminTickets(c.env.DB, parse(z.strictObject({ status: z.enum(TICKET_STATUSES).optional() }), c.req.query()).status) }));

@@ -2,9 +2,10 @@ import initial from "../migrations/0001_inicial.sql";
 import tiers from "../migrations/0002_nivel_y_addons.sql";
 import deleted from "../migrations/0003_licencia_eliminada.sql";
 import released from "../migrations/0004_llave_liberada.sql";
+import faults from "../migrations/0005_fallos.sql";
 import { DAY_MS } from "./catalog";
 
-const MIGRATIONS: [name: string, sql: string][] = [["0001_inicial.sql", initial], ["0002_nivel_y_addons.sql", tiers], ["0003_licencia_eliminada.sql", deleted], ["0004_llave_liberada.sql", released]];
+const MIGRATIONS: [name: string, sql: string][] = [["0001_inicial.sql", initial], ["0002_nivel_y_addons.sql", tiers], ["0003_licencia_eliminada.sql", deleted], ["0004_llave_liberada.sql", released], ["0005_fallos.sql", faults]];
 const TRACKING = "CREATE TABLE IF NOT EXISTS d1_migrations (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL)";
 let ready: Promise<void> | undefined;
 
@@ -60,6 +61,7 @@ export async function purgeExpired(db: D1Database, at: number): Promise<void> {
     db.prepare("DELETE FROM admin_session WHERE expires_at < ?").bind(at),
     db.prepare("DELETE FROM admin_invite WHERE expires_at < ?").bind(at),
     db.prepare("DELETE FROM download_grant WHERE expires_at < ?").bind(at),
+    db.prepare("DELETE FROM fault WHERE status = 'resolved' AND resolved_at < ?").bind(new Date(at - 90 * DAY_MS).toISOString()),
     db.prepare("DELETE FROM admin WHERE active = 0 AND created_at < ?").bind(new Date(at - DAY_MS).toISOString())
   ]);
 

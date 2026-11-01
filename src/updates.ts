@@ -253,9 +253,22 @@ function newer(a: string, b: string): boolean {
   return false;
 }
 
+const PUBLISHED_TO = `FROM release r JOIN publication p ON p.release_id = r.id WHERE r.status = 'ready' AND p.withdrawn_at IS NULL AND (p.target_all = 1 OR EXISTS (SELECT 1 FROM publication_target t WHERE t.publication_id = p.id AND t.license_id = ?1))`;
+
+/** Newest version published to this license on each platform. */
+export async function latestReleases(env: Env, license: LicenseRow) {
+
+  const { results } = await env.DB.prepare(`SELECT DISTINCT r.* ${PUBLISHED_TO}`).bind(license.id).all<ReleaseRow>();
+  const latest: Record<string, { version: string; notes: string }> = {};
+
+  for (const r of results) if (!latest[r.platform] || newer(r.version, latest[r.platform]!.version)) latest[r.platform] = { version: r.version, notes: r.notes };
+
+  return latest;
+}
+
 export async function checkForUpdate(env: Env, license: LicenseRow, platform: string, currentVersion: string) {
 
-  const { results } = await env.DB.prepare(`SELECT DISTINCT r.* FROM release r JOIN publication p ON p.release_id = r.id WHERE r.status = 'ready' AND r.platform = ?1 AND p.withdrawn_at IS NULL AND (p.target_all = 1 OR EXISTS (SELECT 1 FROM publication_target t WHERE t.publication_id = p.id AND t.license_id = ?2))`).bind(platform, license.id).all<ReleaseRow>();
+  const { results } = await env.DB.prepare(`SELECT DISTINCT r.* ${PUBLISHED_TO} AND r.platform = ?2`).bind(license.id, platform).all<ReleaseRow>();
   const latest = results.reduce<ReleaseRow | undefined>((best, r) => (newer(r.version, best?.version ?? currentVersion) ? r : best), undefined);
  
   if (!latest) return { update: null };
