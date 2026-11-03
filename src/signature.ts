@@ -57,9 +57,9 @@ export async function consumeChallenge(env: Env, scope: Scope, subject: string, 
 
 export type SignedRequest = { subject: string; nonce: string; signature: Uint8Array<ArrayBuffer>; body: Uint8Array };
 
-export async function readSigned(c: Ctx): Promise<SignedRequest> {
+export async function readSigned(c: Ctx, limit?: number): Promise<SignedRequest> {
   
-  const body = await rawBody(c);
+  const body = await rawBody(c, limit);
   const subject = c.req.header("x-culinary-subject") ?? "";
   const nonce = c.req.header("x-culinary-challenge") ?? "";
   const signature = c.req.header("x-culinary-signature") ?? "";

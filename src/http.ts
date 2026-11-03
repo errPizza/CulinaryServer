@@ -17,7 +17,8 @@ export type Env = {
 };
 
 export type AdminIdentity = { id: string; username: string };
-export type App = { Bindings: Env; Variables: { admin: AdminIdentity; sessionHash: string } };
+export type OwnerIdentity = { id: string; tenantId: string; email: string; role: "owner" | "manager" };
+export type App = { Bindings: Env; Variables: { admin: AdminIdentity; owner: OwnerIdentity; sessionHash: string } };
 export type Ctx = Context<App>;
 export type ErrorCode = | "bad_request" | "unauthorized" | "forbidden" | "activation_rejected" | "site_mismatch" | "license_expired" | "license_revoked" | "license_transferred" | "binding_mismatch" | "not_found" | "conflict" | "too_large" | "range_not_satisfiable" | "rate_limited" | "server_misconfigured";
 

@@ -4,6 +4,7 @@ import { admin } from "./admin";
 import { adminAccounts, adminAuth } from "./admin-auth";
 import { branch } from "./branch";
 import { migrate, purgeExpired } from "./db";
+import { owner, ownerAuth } from "./owner";
 import { ApiError, type App, type Env } from "./http";
 
 const app = new Hono<App>();
@@ -18,19 +19,24 @@ app.use(async (c, next) => {
 
 });
 
-app.use("/admin/*", cors({
+const appOrigins = cors({
 
   origin: (origin, c) => (c.env.ADMIN_ORIGINS.split(",").map((o: string) => o.trim()).includes(origin) ? origin : null),
   allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
   allowHeaders: ["authorization", "content-type", "x-culinary-subject", "x-culinary-challenge", "x-culinary-signature"],
   maxAge: 600
 
-}));
+});
+
+app.use("/admin/*", appOrigins);
+app.use("/owner/*", appOrigins);
 
 app.route("/branch/v1", branch);
 app.route("/admin/v1", adminAuth);
 app.route("/admin/v1", adminAccounts);
 app.route("/admin/v1", admin);
+app.route("/owner/v1", ownerAuth);
+app.route("/owner/v1", owner);
 app.notFound((c) => c.json({ error: { code: "not_found", message: "Ruta no disponible" } }, 404));
 
 app.onError((error, c) => {

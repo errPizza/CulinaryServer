@@ -99,7 +99,7 @@ request.Headers.Add("X-Culinary-Signature", Base64Url.EncodeToString(signature))
 
 ## 3. Documentos firmados por la raíz
 
-El Worker firma con la llave raíz Ed25519 en formato **JWS compacto** (RFC 7515, `alg` `EdDSA` de RFC 8037):
+Los documentos se firman con Ed25519 en formato **JWS compacto** (RFC 7515, `alg` `EdDSA` de RFC 8037):
 
 ```
 base64url(header) "." base64url(payload) "." base64url(firma)
@@ -207,7 +207,7 @@ Payload de `culinary-license+jws`:
 | `offlineUntil` | `validatedAt` + 7 días: gracia cuando el servicio no responde. |
 | `features` | Subconjunto de `reservations`, `reviews`, `customerRequests`, `printing`, `courses`, `promotions`, `multiBranch` (igual a `Restaurant.Modules`). |
 | `limits` | `maxUsers` y `maxTables`, de 1 a 10000, y `maxTerminals`: terminales fijas simultáneas (los comanderos móviles no cuentan). Si el panel no lo fija, sigue al nivel: 2 en Lite y 10 en Pro. |
-| `key` | Llave de la licencia: la sucursal debe tener su privada. Certificada por la raíz junto con el resto. |
+| `key` | Llave de la licencia: la sucursal debe tener su privada. Certificada por la intermedia de licencias junto con el resto. |
 | `revision` | Sube con cada cambio del panel. La sucursal rechaza una licencia con revisión menor a la guardada. |
 
 Reglas que la sucursal hace cumplir del lado de su servidor:
@@ -244,7 +244,7 @@ Una licencia vencida o revocada no se renueva: `403` con `code` `license_expired
 }
 ```
 
-La sucursal se bloquea de inmediato, sin esperar a que acabe la gracia, solo si el aviso está firmado por la raíz, trae su `licenseId` y su `siteId`, su `challenge` es el nonce que ella misma envió en esa solicitud y su `revision` no es menor que la guardada. Así un aviso viejo no se puede reenviar después de una renovación. Un `403` sin `notice` válido no bloquea por sí solo: puede venir de un intermediario.
+La sucursal se bloquea de inmediato, sin esperar a que acabe la gracia, solo si el aviso pasa la verificación de la sección 3, trae su `licenseId` y su `siteId`, su `challenge` es el nonce que ella misma envió en esa solicitud y su `revision` no es menor que la guardada. Así un aviso viejo no se puede reenviar después de una renovación. Un `403` sin `notice` válido no bloquea por sí solo: puede venir de un intermediario.
 
 Todas las rutas firmadas de la sucursal que rechazan una licencia vencida o revocada (renovación, actualizaciones, soporte, registro) responden con el mismo `notice`.
 
@@ -300,7 +300,7 @@ El payload de `culinary-release+jws` lleva `v`, `releaseId`, `version`, `platfor
 
 Antes de instalar, la sucursal comprueba:
 
-1. `update` firmado por la raíz, `typ` `culinary-update+jws`, con su `licenseId` y su `siteId`, y `exp` sin vencer.
+1. `update` y `release` pasan la verificación de la sección 3. `update` tiene `typ` `culinary-update+jws`, con su `licenseId` y su `siteId`, y `exp` sin vencer.
 2. La versión es mayor que la instalada.
 3. El tamaño y el SHA-512 del archivo descargado coinciden con `bytes` y `sha512`.
 
@@ -358,6 +358,22 @@ Respuesta `200`: `{ "siteId": "...", "tenantId": "...", "centralCertificateSha25
 | `firstAt`, `lastAt` | ISO 8601 |
 
 Repetir `fingerprint` suma `occurrences`, actualiza `detail`, `context` y `version`, y reabre el fallo si estaba resuelto. Con 500 fallos abiertos en una licencia, los conocidos se siguen contando y los nuevos se descartan.
+
+### 4.9 Resúmenes del panel del propietario
+
+`POST /branch/v1/stats`, firmada como las demás. El contrato y las fórmulas están en `docs/METRICAS-PANEL.md` del repositorio de la sucursal. Cuerpo de hasta 2 MiB y 10 días, y sólo con licencia utilizable: una vencida o revocada recibe `403` con su `notice`.
+
+```json
+{ "accepted": ["2026-10-30"], "ignored": ["2026-10-29"], "rejected": ["2026-10-28"] }
+```
+
+| Lista | Significado |
+|---|---|
+| `accepted` | El día se guardó y reemplazó al anterior. |
+| `ignored` | Ya había una revisión igual o mayor. Reenviar es seguro. |
+| `rejected` | Sus cifras no cuadran. No se publica, abre un fallo y la sucursal lo conserva pendiente. |
+
+Cada subida renueva `live`, y una sucursal sin contacto por más de 15 minutos aparece como atrasada.
 
 ## 5. CulinaryAdmin (`/admin/v1`)
 
@@ -527,6 +543,16 @@ Subida a R2 por partes, para paquetes de cualquier tamaño:
 
 Cada fila trae los campos de sucursal del archivo `--provision-tenant` de `MesaNexo.Central` (`tenantId`, `branchId`, `siteId`, `slug`, `certificateSha256`, `tenantName`, `branchName`). Las credenciales del dueño no pasan por este Worker.
 
+### 5.7 Cuentas del panel del propietario
+
+| Ruta | Uso |
+|---|---|
+| `POST /owner-invites` | Con firma del dispositivo. Cuerpo `{ "tenantId", "email", "role", "licenseIds" }`. `role` es `owner` o `manager`; el gerente lleva sus sucursales y el dueño ninguna. Responde `{ "code", "expiresAt" }`, válido 7 días. |
+| `GET /owner-accounts?tenantId=` | Cuentas de un negocio. |
+| `DELETE /owner-accounts/:id` | Con firma del dispositivo. Elimina la cuenta y sus sesiones. |
+
+Mientras no haya correo, quien pierde su contraseña o su autenticador recupera el acceso así: se elimina su cuenta y se le invita de nuevo.
+
 ### 5.6 Fallos
 
 | Ruta | Respuesta |
@@ -537,3 +563,29 @@ Cada fila trae los campos de sucursal del archivo `--provision-tenant` de `MesaN
 
 `Fault` lleva los campos de §4.8 menos `fingerprint`, más `id`, `licenseId`, `customer`, `branchName`, `siteId`, `status`, `resolvedAt` y `resolvedBy`. Los resueltos se borran a los 90 días.
 
+## 6. Panel del propietario (`/owner/v1`)
+
+Sin firma de dispositivo: correo, contraseña de 12 caracteres o más y TOTP. Tras cinco intentos fallidos la cuenta se bloquea 15 minutos. Las sesiones duran 30 días y viajan como `Authorization: Bearer`.
+
+| Ruta | Uso |
+|---|---|
+| `POST /enroll` | `{ "code", "password" }`. Gasta el código y responde el secreto TOTP. |
+| `POST /enroll/confirm` | `{ "email", "password", "totp" }`. Activa la cuenta. |
+| `POST /login` | `{ "email", "password", "totp" }`. Responde `{ "token", "expiresAt" }`. |
+| `POST /logout` | Cierra la sesión. |
+| `GET /me` | La cuenta y sus sucursales, con licencia, último contacto, `stale` y `live`. |
+| `GET /stats/summary` | Totales, ranking por sucursal, días, horas, canales, pagos y devoluciones. `partial` lista las sucursales atrasadas o sin datos. |
+| `GET /stats/products` | Por nombre y categoría, porque cada sucursal tiene sus propios identificadores. El margen estimado sólo cuenta productos con receta. |
+| `GET /stats/staff` | Por sucursal y mesero. |
+| `GET /stats/cash` | Movimientos, merma y arqueos. |
+| `GET /stats/closings` | Cada corte junto a lo que cuenta el panel. `reopenedNet` y `reopenedTickets` son lo que explican las reaperturas. |
+
+Las rutas `/stats/*` piden `from` y `to` (`AAAA-MM-DD`, días de negocio, máximo 366) y aceptan `branch` con un `licenseId`. El servidor filtra por el negocio de la cuenta, y un gerente sólo alcanza sus sucursales. Una sucursal fuera de alcance responde `404`, igual que una inexistente. Lo subido sigue consultable con la licencia vencida, y una licencia eliminada desaparece del panel.
+
+**Planes.** El servidor recorta por el `tier` de cada licencia, así que una sucursal Lite nunca entrega cifras Pro:
+
+- Lite entra en ventas, cuentas, comensales, ticket promedio, ranking, días y cantidad e ingreso de productos. Las horas sólo cuando el periodo es un día, para comparar hoy con ayer a la misma hora.
+- Sus filas llevan en cero `gross`, `discounts`, `voidedCount`, `voidedAmount`, `comps` y `staffMeals`, y no aportan canales, pagos, devoluciones, costo ni margen. `/stats/staff`, `/stats/cash` y `/stats/closings` sólo cuentan sucursales Pro, y `live.lowStock` de una Lite va vacío.
+- Lite lee desde el primer día de su mes en curso o desde seis días antes de su día de negocio, lo que llegue más atrás. Si el periodo empieza antes, la sucursal queda fuera de toda la respuesta.
+
+Cada respuesta de `/stats/*` dice `lite`, las sucursales Lite que no entran en las cifras Pro, y `outOfRange`, las que quedaron fuera por el periodo.

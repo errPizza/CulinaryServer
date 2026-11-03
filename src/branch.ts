@@ -8,6 +8,7 @@ import { audit } from "./db";
 import { faultsSchema, recordFaults } from "./faults";
 import { findLicense, licenseToken, requireUsable, statusNotice, type LicenseRow } from "./licenses";
 import { consumeChallenge, issueChallenge, readSigned, signedBy, verifySigned } from "./signature";
+import { MAX_STATS_BYTES, recordStats, statsSchema } from "./stats";
 import { addTicketMessage, branchTickets, createTicket } from "./tickets";
 import { checkForUpdate, latestReleases, streamDownload } from "./updates";
 
@@ -30,9 +31,9 @@ const renewSchema = z.strictObject({ fingerprint: fingerprintSchema.optional() }
 const unauthorized = () => new ApiError(401, "unauthorized", "Firma o reto inválido");
 type Authenticated = { license: LicenseRow; body: Uint8Array; challenge: string };
 
-async function authenticate(c: Ctx): Promise<Authenticated> {
+async function authenticate(c: Ctx, limit?: number): Promise<Authenticated> {
 
-  const request = await readSigned(c);
+  const request = await readSigned(c, limit);
   const license = await findLicense(c.env.DB, request.subject);
 
   if (!license || !(license.key_spki || license.released_spki)) throw unauthorized();
@@ -183,6 +184,17 @@ branch.post("/faults", async (c) => {
   await requireUsable(c.env, license, { allowExpired: true, challenge });
 
   return c.json(await recordFaults(c.env.DB, license.id, input.faults));
+});
+
+// Only a usable license publishes; what was already sent stays readable for the owner.
+branch.post("/stats", async (c) => {
+
+  const { license, body, challenge } = await authenticate(c, MAX_STATS_BYTES);
+  const input = parseJson(statsSchema, body);
+
+  await requireUsable(c.env, license, { challenge });
+
+  return c.json(await recordStats(c.env.DB, license, input));
 });
 
 branch.put("/registry", async (c) => {

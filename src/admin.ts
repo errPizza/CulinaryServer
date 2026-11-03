@@ -7,6 +7,7 @@ import { keyFloor, licenseSigner, rootPublic } from "./keys";
 import { audit } from "./db";
 import { adminFaults, FAULT_STATUSES, reopenFault, resolveFault } from "./faults";
 import { ApiError, parse, readJson, uniqueOr409, type App } from "./http";
+import { ownerAdmin } from "./owner";
 import { features, getLicense, LICENSE_STATUSES, licenseStatus, licenseView, nextExpiry, type LicenseRow } from "./licenses";
 import { addTicketMessage, adminTickets, closeTicket, ticketDetail, TICKET_STATUSES } from "./tickets";
 import { abortRelease, attachManifest, completeRelease, completeSchema, createRelease, listPublications, listReleases, manifestSchema, publicationSchema, publish, releaseSchema, uploadPart, withdraw } from "./updates";
@@ -71,7 +72,7 @@ async function editable(db: D1Database, id: string): Promise<LicenseRow> {
   return row;
 }
 
-export const admin = new Hono<App>().use(requireAdmin);
+export const admin = new Hono<App>().use(requireAdmin).route("/", ownerAdmin);
 
 admin.get("/root-key", async (c) => {
 

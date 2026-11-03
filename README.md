@@ -101,6 +101,5 @@ Las pruebas corren dentro del runtime de Workers con `@cloudflare/vitest-plugin`
 - **TPM sin atestación:** el Worker registra la llave pública que la sucursal declara como del TPM (exige que sea P-256), pero no verifica el certificado de respaldo (EK) del fabricante.
 - **La huella de hardware solo se revisa al renovar.** Las demás rutas de la sucursal confían en la firma de la llave. Una llave copiada a otro equipo deja de renovar, y a los 7 días la licencia se bloquea sola.
 - **El registro mTLS no prueba la posesión del certificado.** Una sucursal con licencia podría registrar primero la huella del certificado de otra; la verdadera recibiría `409`. El proveedor lo ve en `GET /admin/v1/registry` y lo corrige liberando el equipo.
-- **La misma raíz firma los paquetes.** Es lo pedido (una sola llave, en el Worker). Si alguien tomara el control del Worker podría firmar un paquete; una llave de publicación aparte, fuera de línea, cerraría ese hueco.
 - **Revocar es definitivo.** Para volver a dar servicio se crea otra licencia.
 - **PBKDF2 a 100 000 iteraciones**, para mantener corto el inicio de sesión; lo compensan la llave del dispositivo y el TOTP.

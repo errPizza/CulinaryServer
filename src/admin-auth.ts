@@ -3,7 +3,7 @@ import { z } from "zod";
 import { audit } from "./db";
 import { hashHumanCode, hashPassword, issueHumanCode, newTotpSecret, publicKeySchema, randomToken, sameSecret, sha256Hex, verifyPassword, verifyTotp, type KeyAlg } from "./crypto";
 import { ApiError, bearerHash, parseJson, readJson, uniqueOr409, type AdminIdentity, type App, type Ctx } from "./http";
-import { issueChallenge, readSigned, verifySigned } from "./signature";
+import { issueChallenge, readSigned, verifySigned, type SignedRequest } from "./signature";
 
 const SESSION_TTL_MS = 8 * 60 * 60 * 1000;
 const INVITE_TTL_MS = 24 * 60 * 60 * 1000;
@@ -66,13 +66,14 @@ async function consumeEnrollmentCode(env: App["Bindings"], code: string): Promis
   return invite;
 }
 
-async function requireFreshSignature(c: Ctx): Promise<void> {
+export async function requireFreshSignature(c: Ctx): Promise<SignedRequest> {
 
   const request = await readSigned(c);
   const admin = await adminByUsername(c.env.DB, request.subject);
 
   if (!admin || admin.id !== c.var.admin.id || !(await verifySigned(c, "admin", request, admin.key_alg, admin.key_spki))) throw new ApiError(401, "unauthorized", "Firma del dispositivo requerida");
 
+  return request;
 }
 
 export const adminAuth = new Hono<App>();

@@ -3,7 +3,7 @@ import { beforeEach, expect } from "vitest";
 import { migrate } from "../src/db";
 
 // Storage is shared by the tests of one file, so each test starts from empty tables (children first).
-const TABLES = ["ticket_message", "ticket", "download_grant", "fault", "publication_target", "publication", "release", "audit", "admin_session", "admin_invite", "admin", "used_challenge", "license"];
+const TABLES = ["owner_session", "owner_membership", "owner_invite", "owner_account", "branch_heartbeat", "stats_day", "ticket_message", "ticket", "download_grant", "fault", "publication_target", "publication", "release", "audit", "admin_session", "admin_invite", "admin", "used_challenge", "license"];
 
 beforeEach(async () => {
   await migrate(env.DB);
