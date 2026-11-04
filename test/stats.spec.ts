@@ -59,7 +59,7 @@ describe("resúmenes de la sucursal", () => {
     expect(await json(await signedBranch(centro, "POST", path, older), 200)).toMatchObject({ accepted: [] });
     const { token } = await ownerSession(admin, "grupo", "dueno@ejemplo.mx");
     expect((await read(`/owner/v1/stats/summary?${FULL}`, token)).totals.net).toBe(85600);
-    await json(await signedBranch(centro, "POST", path, revised(vector, 6, (day) => { if (day.businessDate === "2026-10-31") Object.assign(day, { hours: [], channels: [], staff: [], products: [], payments: [] }); })), 200);
+    await json(await signedBranch(centro, "POST", path, revised(vector, 6, (day) => { if (day.businessDate === "2026-10-31") Object.assign(day, { hours: [], channels: [], staff: [], products: [], payments: [], areas: [], kinds: [] }); })), 200);
     expect((await read(`/owner/v1/stats/summary?${FULL}`, token)).totals.net).toBe(59600);
   });
 
@@ -73,7 +73,7 @@ describe("resúmenes de la sucursal", () => {
 
   it("rechaza subidas mal formadas, enormes, de quien no está activado y con la licencia vencida", async () => {
     const { admin, centro } = await business("grupo");
-    expect((await signedBranch(centro, "POST", "/branch/v1/stats", { ...vector, schema: 2 })).status).toBe(400);
+    expect((await signedBranch(centro, "POST", "/branch/v1/stats", { ...vector, schema: 3 })).status).toBe(400);
     expect((await signedBranch(centro, "POST", "/branch/v1/stats", { ...vector, cliente: "Mario" })).status).toBe(400);
     expect((await signedBranch(centro, "POST", "/branch/v1/stats", { ...vector, days: Array(11).fill(vector.days[0]) })).status).toBe(400);
     expect((await signedBranch(centro, "POST", "/branch/v1/stats", { ...vector, padding: "x".repeat(2 * 1024 * 1024) })).status).toBe(413);
@@ -106,7 +106,7 @@ describe("consultas del propietario", () => {
     const one = "from=2026-10-30&to=2026-10-30";
     const summary = await read(`/owner/v1/stats/summary?${one}&branch=${centro.license.id}`, token);
     expect(summary.totals).toMatchObject({ tickets: 2, people: 5, gross: 64000, discounts: 4400, net: 59600, averageTicket: 29800, averagePerson: 11920, voidedCount: 1, voidedAmount: 6000 });
-    expect(summary.hours).toEqual([{ hour: 1, tickets: 1, net: 20000 }, { hour: 20, tickets: 1, net: 39600 }]);
+    expect(summary.hours).toEqual([{ hour: 1, tickets: 1, net: 20000, people: 2 }, { hour: 20, tickets: 1, net: 39600, people: 3 }]);
     expect(summary.channels).toEqual([{ channel: "table", tickets: 2, net: 59600 }]);
     expect(summary.payments).toEqual([{ method: "card", amount: 39600, tips: 5000, count: 1 }, { method: "cash", amount: 40000, tips: 0, count: 2 }]);
     const { products } = await read(`/owner/v1/stats/products?${one}`, token);
@@ -135,7 +135,7 @@ describe("consultas del propietario", () => {
     const other = copy(vector);
     other.days = [{ ...copy(vector.days[1]!), businessDate: "2026-10-30" }];
     const day = other.days[0]! as any;
-    Object.assign(day, { hours: [{ ...day.hours[0], tickets: 3, gross: 10001, discounts: 0, net: 10001, deliveryFees: 0 }], channels: [{ channel: "table", tickets: 3, net: 10001 }], staff: [{ staffId: "w9", name: "Eva", tickets: 3, net: 10001, tips: 0 }], products: [{ productId: "x", name: "Taco", category: "Platos", quantity: 3, revenue: 10001, unitCost: null }], payments: [], zReports: [] });
+    Object.assign(day, { hours: [{ ...day.hours[0], tickets: 3, gross: 10001, discounts: 0, net: 10001, deliveryFees: 0 }], channels: [{ channel: "table", tickets: 3, net: 10001 }], staff: [{ staffId: "w9", name: "Eva", tickets: 3, net: 10001, tips: 0 }], products: [{ productId: "x", name: "Taco", category: "Platos", quantity: 3, revenue: 10001, unitCost: null }], payments: [], zReports: [], areas: [{ area: "", tickets: 3, people: 0, net: 10001 }], kinds: [{ kind: "", quantity: 3, revenue: 10001 }], team: [], labor: [] });
     await json(await signedBranch(norte, "POST", "/branch/v1/stats", other), 200);
     const { token } = await ownerSession(admin, "grupo", "dueno@ejemplo.mx");
     const { totals, branches, partial } = await read("/owner/v1/stats/summary?from=2026-10-30&to=2026-10-30", token);

@@ -5,6 +5,8 @@ import { audit } from "./db";
 import { hashHumanCode, hashPassword, issueHumanCode, newTotpSecret, randomToken, sha256Hex, verifyPassword, verifyTotp } from "./crypto";
 import { ApiError, bearerHash, parse, parseJson, readJson, type App, type Ctx, type OwnerIdentity } from "./http";
 import { branchView, cash, closings, products, rangeSchema, staff, summary, type BranchRow } from "./stats";
+import { alerts, customers, goals, kitchen, menu, profit, readSettings, settingsSchema, summaryExtras, team, trend, writeSettings } from "./insights";
+import { forecast } from "./forecast";
 
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -139,6 +141,26 @@ async function selection(c: Ctx) {
   return { branches: [chosen], range };
 }
 
+async function chosenBranches(c: Ctx, branch?: string) {
+
+  const branches = await reachable(c);
+
+  if (branch === undefined) return branches;
+
+  const chosen = branches.find((b) => b.id === branch);
+
+  if (!chosen) throw new ApiError(404, "not_found", "Sucursal no encontrada");
+
+  return [chosen];
+}
+
+async function selectionWith(c: Ctx) {
+
+  const { branch, ...range } = parse(rangeSchema, c.req.query());
+
+  return { branches: await chosenBranches(c, branch), range, branch };
+}
+
 export const owner = new Hono<App>().use(requireOwner);
 
 owner.get("/me", async (c) => {
@@ -155,7 +177,16 @@ owner.post("/logout", async (c) => {
   return c.json({ ok: true });
 });
 
-for (const [path, read] of Object.entries({ summary, products, staff, cash, closings })) {
+owner.get("/stats/summary", async (c) => {
+
+  const { branches, range } = await selection(c);
+  const settings = await readSettings(c.env.DB, c.var.owner.tenantId);
+  const [base, extras] = await Promise.all([summary(c.env.DB, branches, range), summaryExtras(c.env.DB, branches, range, settings)]);
+
+  return c.json({ ...base, ...extras });
+});
+
+for (const [path, read] of Object.entries({ products, staff, cash, closings })) {
 
   owner.get(`/stats/${path}`, async (c) => {
 
@@ -166,6 +197,92 @@ for (const [path, read] of Object.entries({ summary, products, staff, cash, clos
   });
 
 }
+
+// Reads that need more than a period: the owner's settings, the role of who asks, or only the branch.
+const byRange = { menu, profit, kitchen, customers } as const;
+
+for (const [path, read] of Object.entries(byRange)) {
+
+  owner.get(`/stats/${path}`, async (c) => {
+
+    const { branches, range, branch } = await selectionWith(c);
+    const settings = await readSettings(c.env.DB, c.var.owner.tenantId);
+
+    return c.json(await read(c.env.DB, branches, range, settings, branch));
+
+  });
+
+}
+
+owner.get("/stats/team", async (c) => {
+
+  const { branches, range } = await selectionWith(c);
+
+  return c.json(await team(c.env.DB, branches, range, await readSettings(c.env.DB, c.var.owner.tenantId), c.var.owner.role));
+});
+
+owner.get("/stats/trend", async (c) => {
+
+  const by = parse(z.enum(["week", "month", "year"]).default("month"), c.req.query("by"));
+  const query = c.req.query();
+  const { branch, ...range } = parse(rangeSchema, { from: query.from, to: query.to, ...(query.branch === undefined ? {} : { branch: query.branch }) });
+
+  return c.json(await trend(c.env.DB, await chosenBranches(c, branch), range, by));
+});
+
+owner.get("/stats/goals", async (c) => {
+
+  const branch = parse(z.string().max(64).optional(), c.req.query("branch"));
+
+  return c.json(await goals(c.env.DB, await chosenBranches(c, branch), await readSettings(c.env.DB, c.var.owner.tenantId), branch));
+});
+
+owner.get("/stats/forecast", async (c) => {
+
+  const branch = parse(z.string().max(64).optional(), c.req.query("branch"));
+
+  return c.json(await forecast(c.env.DB, await chosenBranches(c, branch), await readSettings(c.env.DB, c.var.owner.tenantId)));
+});
+
+owner.get("/stats/alerts", async (c) => {
+
+  const branch = parse(z.string().max(64).optional(), c.req.query("branch"));
+
+  return c.json(await alerts(c.env.DB, await chosenBranches(c, branch), await readSettings(c.env.DB, c.var.owner.tenantId), c.var.owner.role));
+});
+
+owner.get("/settings", async (c) => c.json({ settings: await readSettings(c.env.DB, c.var.owner.tenantId), canEdit: c.var.owner.role === "owner" }));
+
+// Only the owner changes how the panel reads the business; a manager reads the same settings.
+owner.put("/settings", async (c) => {
+
+  if (c.var.owner.role !== "owner") throw new ApiError(403, "forbidden", "Sólo el dueño cambia los ajustes del panel");
+
+  const input = await readJson(c, settingsSchema);
+  const own = new Set((await reachable(c)).map((b) => b.id));
+  const used = [...input.goals.map((g) => g.licenseId), ...input.fixedCosts.map((f) => f.licenseId), ...input.locations.map((l) => l.licenseId)].filter(Boolean);
+
+  if (!used.every((id) => own.has(id))) throw new ApiError(404, "not_found", "Sucursal no encontrada");
+
+  await writeSettings(c.env.DB, c.var.owner.tenantId, c.var.owner.id, input);
+
+  return c.json({ settings: input, canEdit: true });
+});
+
+// The city of a branch for its weather, looked up by name. Only coordinates are kept.
+owner.get("/geocode", async (c) => {
+
+  if (c.var.owner.role !== "owner") throw new ApiError(403, "forbidden", "Sólo el dueño cambia los ajustes del panel");
+
+  const q = parse(z.string().trim().min(2).max(100), c.req.query("q"));
+  const response = await fetch(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(q)}&count=5&language=es&format=json`).catch(() => null);
+
+  if (!response?.ok) throw new ApiError(503, "server_misconfigured", "No se pudo buscar la ciudad. Intenta de nuevo.");
+
+  const body = await response.json() as { results?: { name: string; admin1?: string; country?: string; latitude: number; longitude: number }[] };
+
+  return c.json({ places: (body.results ?? []).map((p) => ({ label: [p.name, p.admin1, p.country].filter(Boolean).join(", "), lat: p.latitude, lon: p.longitude })) });
+});
 
 const inviteSchema = z.strictObject({
 

@@ -31,13 +31,30 @@ const daySchema = z.strictObject({
   cash: z.strictObject({ income: money, expense: money, withdrawal: money }),
   cashCloses: z.array(z.strictObject({ cashId: text(64), closedAt: moment, blind: z.boolean(), cashDifference: money, cardDifference: money, transferDifference: money, adjustments: money })).max(100),
   inventory: z.strictObject({ waste: money, shortage: money, surplus: money }),
-  zReports: z.array(z.strictObject({ number: count, from: moment, to: moment, tickets: count, people: count, gross: money, discounts: money, net: money, tax: money, payments: money, tips: money, refunds: money, digest: text(64) })).max(100)
+  zReports: z.array(z.strictObject({ number: count, from: moment, to: moment, tickets: count, people: count, gross: money, discounts: money, net: money, tax: money, payments: money, tips: money, refunds: money, digest: text(64) })).max(100),
+  // Schema 2. Optional, so a branch that still sends schema 1 keeps publishing.
+  areas: z.array(z.strictObject({ area: text(100), tickets: count, people: count, net: money })).max(200).optional(),
+  kinds: z.array(z.strictObject({ kind: z.enum(["", "food", "drink", "alcohol", "other"]), quantity: count, revenue: money })).max(5).optional(),
+  team: z.array(z.strictObject({ staffId: text(64), name: text(300), role: text(32), people: count, tables: count, voids: count, voidAmount: money, discounts: count, discountAmount: money, rejected: count, reopens: count, drawerOpens: count, minutes: count, laborCost: money })).max(500).optional(),
+  labor: z.array(z.strictObject({ hour, minutes: count, cost: money })).max(24).optional(),
+  couriers: z.array(z.strictObject({ courierId: text(64), name: text(300), deliveries: count, net: money })).max(200).optional(),
+  kitchen: z.array(z.strictObject({ productId: text(64), name: text(300), station: text(100), count, waitSeconds: count, prepSeconds: count, maxSeconds: count, passCount: count, passSeconds: count })).max(5000).optional(),
+  returns: z.array(z.strictObject({ productId: text(64), name: text(300), reason: z.enum(["cold", "doneness", "foreign", "taste", "wrong", "late", "other"]), count })).max(5000).optional(),
+  promises: z.array(z.strictObject({ mode: text(32), count, late: count, promisedSeconds: count, actualSeconds: count })).max(10).optional(),
+  reviews: z.strictObject({ count, food: count, service: count, overall: count, low: count }).optional(),
+  reviewProducts: z.array(z.strictObject({ productId: text(64), name: text(300), count, overall: count })).max(5000).optional(),
+  expenses: z.array(z.strictObject({ account: text(100), amount: money, count })).max(200).optional(),
+  customers: z.strictObject({ tickets: count, net: money, first: count, repeat: count }).optional()
 
 });
 
+export const INSIGHT_SECTIONS = ["areas", "kinds", "team", "labor", "couriers", "kitchen", "returns", "promises", "reviews", "reviewProducts", "expenses", "customers"] as const;
+
+const ingredientNames = z.array(text(300)).max(10);
+
 export const statsSchema = z.strictObject({
 
-  schema: z.literal(1),
+  schema: z.union([z.literal(1), z.literal(2)]),
   sentAt: moment,
   branch: z.strictObject({ timeZone: text(64), businessDayCutoffMinutes: z.int().min(0).max(720), currency: z.literal("MXN"), appVersion: text(32), lastZ: count }),
   live: z.strictObject({
@@ -48,15 +65,22 @@ export const statsSchema = z.strictObject({
     openAmount: money,
     pendingRequests: count,
     cashOpen: z.boolean(),
-    lowStock: z.array(z.strictObject({ ingredientId: text(64), name: text(300), unit: text(32), available: money, min: money })).max(100)
+    lowStock: z.array(z.strictObject({ ingredientId: text(64), name: text(300), unit: text(32), available: money, min: money })).max(100),
+    tables: z.strictObject({ total: count, free: count, occupied: count, cleaning: count, reserved: count }).optional(),
+    partial: z.strictObject({ count, paid: money }).optional(),
+    onClock: z.strictObject({ people: count, hourlyCost: money }).optional(),
+    customers: z.strictObject({ identified: count, active90: count, repeat90: count, averageGapDays: count, lifetimeAverage: money, visitsAverageTenths: count, vip: count, vipLapsed: count }).optional(),
+    expiring: z.array(z.strictObject({ ingredientId: text(64), name: text(300), unit: text(32), quantity: money, cost: money, expiresOn: date, days: z.int(), products: ingredientNames })).max(100).optional(),
+    costAlerts: z.array(z.strictObject({ ingredientId: text(64), name: text(300), unit: text(32), before: money, after: money, changeBps: z.int(), at: moment, products: z.array(z.strictObject({ name: text(300), price: money, cost: money.nullable() })).max(10) })).max(20).optional(),
+    roster: z.strictObject({ active: count, byRole: z.record(text(32), count), months: z.array(z.strictObject({ month: z.string().regex(/^\d{4}-\d{2}$/), hires: count, exits: count, headcount: count })).max(12) }).optional()
 
   }),
   days: z.array(daySchema).max(10)
 
 });
 
-type Stats = z.infer<typeof statsSchema>;
-type Day = Stats["days"][number];
+export type Stats = z.infer<typeof statsSchema>;
+export type Day = Stats["days"][number];
 
 const TOTALS = ["tickets", "people", "gross", "discounts", "net", "tax", "deliveryFees", "voidedCount", "voidedAmount", "comps", "staffMeals"] as const;
 
@@ -73,13 +97,16 @@ function dayProblem(day: Day): string | null {
   if (sum(day.products, (p) => p.revenue) + sum(day.hours, (h) => h.deliveryFees) !== sum(day.hours, (h) => h.gross)) return "productos más envío distintos de la venta bruta";
   if (day.hours.some((h) => h.gross - h.discounts !== h.net)) return "bruta menos descuentos distinta de ventas";
   if (sum(day.payments, (p) => p.tips) !== sum(day.staff, (s) => s.tips)) return "propinas distintas por pago y por mesero";
+  if (day.areas && net !== sum(day.areas, (a) => a.net)) return "ventas distintas por hora y por área";
+  if (day.kinds && sum(day.products, (p) => p.revenue) !== sum(day.kinds, (k) => k.revenue)) return "productos distintos por tipo de categoría";
+  if (day.labor && day.team && (sum(day.labor, (l) => l.minutes) !== sum(day.team, (t) => t.minutes) || sum(day.labor, (l) => l.cost) !== sum(day.team, (t) => t.laborCost))) return "costo laboral distinto por hora y por persona";
 
   return null;
 }
 
-const UPSERT_DAY = `INSERT INTO stats_day (license_id, business_date, revision, complete, received_at, tickets, people, gross, discounts, net, tax, delivery_fees, voided_count, voided_amount, comps, staff_meals, hours, payments, refunds, channels, products, staff, cash, cash_closes, inventory, z_reports)
-  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)
-  ON CONFLICT (license_id, business_date) DO UPDATE SET revision = excluded.revision, complete = excluded.complete, received_at = excluded.received_at, tickets = excluded.tickets, people = excluded.people, gross = excluded.gross, discounts = excluded.discounts, net = excluded.net, tax = excluded.tax, delivery_fees = excluded.delivery_fees, voided_count = excluded.voided_count, voided_amount = excluded.voided_amount, comps = excluded.comps, staff_meals = excluded.staff_meals, hours = excluded.hours, payments = excluded.payments, refunds = excluded.refunds, channels = excluded.channels, products = excluded.products, staff = excluded.staff, cash = excluded.cash, cash_closes = excluded.cash_closes, inventory = excluded.inventory, z_reports = excluded.z_reports
+const UPSERT_DAY = `INSERT INTO stats_day (license_id, business_date, revision, complete, received_at, tickets, people, gross, discounts, net, tax, delivery_fees, voided_count, voided_amount, comps, staff_meals, hours, payments, refunds, channels, products, staff, cash, cash_closes, inventory, z_reports, insights)
+  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27)
+  ON CONFLICT (license_id, business_date) DO UPDATE SET revision = excluded.revision, complete = excluded.complete, received_at = excluded.received_at, tickets = excluded.tickets, people = excluded.people, gross = excluded.gross, discounts = excluded.discounts, net = excluded.net, tax = excluded.tax, delivery_fees = excluded.delivery_fees, voided_count = excluded.voided_count, voided_amount = excluded.voided_amount, comps = excluded.comps, staff_meals = excluded.staff_meals, hours = excluded.hours, payments = excluded.payments, refunds = excluded.refunds, channels = excluded.channels, products = excluded.products, staff = excluded.staff, cash = excluded.cash, cash_closes = excluded.cash_closes, inventory = excluded.inventory, z_reports = excluded.z_reports, insights = excluded.insights
   WHERE excluded.revision > stats_day.revision RETURNING business_date`;
 
 function writeDay(db: D1Database, licenseId: string, at: string, d: Day) {
@@ -87,7 +114,9 @@ function writeDay(db: D1Database, licenseId: string, at: string, d: Day) {
   const figures = TOTALS.map((key) => sum(d.hours, (h) => h[key]));
   const sections = [d.hours, d.payments, d.refunds, d.channels, d.products, d.staff, d.cash, d.cashCloses, d.inventory, d.zReports].map((section) => JSON.stringify(section));
 
-  return db.prepare(UPSERT_DAY).bind(licenseId, d.businessDate, d.revision, d.complete ? 1 : 0, at, ...figures, ...sections);
+  const insights = Object.fromEntries(INSIGHT_SECTIONS.filter((key) => d[key] !== undefined).map((key) => [key, d[key]]));
+
+  return db.prepare(UPSERT_DAY).bind(licenseId, d.businessDate, d.revision, d.complete ? 1 : 0, at, ...figures, ...sections, JSON.stringify(insights));
 }
 
 /** Sending again is safe in any order: a day is replaced only by a higher revision. A day that does not add up is not published. */
@@ -130,19 +159,19 @@ export const rangeSchema = z.strictObject({ from: date, to: date, branch: z.stri
 export type Range = { from: string; to: string };
 export type BranchRow = LicenseRow & { seen_at: string | null; seen_branch: string | null; seen_live: string | null };
 
-const SUM_TOTALS = "SUM(tickets) AS tickets, SUM(people) AS people, SUM(gross) AS gross, SUM(discounts) AS discounts, SUM(net) AS net, SUM(tax) AS tax, SUM(delivery_fees) AS deliveryFees, SUM(voided_count) AS voidedCount, SUM(voided_amount) AS voidedAmount, SUM(comps) AS comps, SUM(staff_meals) AS staffMeals";
-const IN_RANGE = "d.license_id IN (SELECT value FROM json_each(?1)) AND d.business_date BETWEEN ?2 AND ?3";
-const scope = (branches: BranchRow[], range: Range) => [JSON.stringify(branches.map((b) => b.id)), range.from, range.to];
-const field = (name: string) => `json_extract(j.value, '$.${name}')`;
-const added = (...names: string[]) => names.map((n) => `SUM(${field(n)}) AS ${n}`).join(", ");
+export const SUM_TOTALS = "SUM(tickets) AS tickets, SUM(people) AS people, SUM(gross) AS gross, SUM(discounts) AS discounts, SUM(net) AS net, SUM(tax) AS tax, SUM(delivery_fees) AS deliveryFees, SUM(voided_count) AS voidedCount, SUM(voided_amount) AS voidedAmount, SUM(comps) AS comps, SUM(staff_meals) AS staffMeals";
+export const IN_RANGE = "d.license_id IN (SELECT value FROM json_each(?1)) AND d.business_date BETWEEN ?2 AND ?3";
+export const scope = (branches: BranchRow[], range: Range) => [JSON.stringify(branches.map((b) => b.id)), range.from, range.to];
+export const field = (name: string) => `json_extract(j.value, '$.${name}')`;
+export const added = (...names: string[]) => names.map((n) => `SUM(${field(n)}) AS ${n}`).join(", ");
 
 // The date the branch itself is living: 01:30 on Saturday is still Friday night before its cutoff.
-function businessDate(branch: Stats["branch"], at: number) {
+export function businessDate(branch: Stats["branch"], at: number) {
 
   return new Date(at - branch.businessDayCutoffMinutes * 60_000).toLocaleDateString("en-CA", { timeZone: branch.timeZone });
 }
 
-const isPro = (row: BranchRow) => row.tier === "pro";
+export const isPro = (row: BranchRow) => row.tier === "pro";
 
 /** The first business day a Lite branch can read: its running month or its last seven days, whichever reaches further back. Older days and every comparison they allow are Pro. */
 function liteFrom(row: BranchRow, at: number) {
@@ -183,8 +212,8 @@ export function branchView(row: BranchRow, at = Date.now()) {
     businessDayCutoffMinutes: branch?.businessDayCutoffMinutes ?? null,
     lastZ: branch?.lastZ ?? null,
     appVersion: branch?.appVersion ?? null,
-    // Low stock is inventory, a Pro area.
-    live: live && !isPro(row) ? { ...live, lowStock: [] } : live
+    // Low stock, lots, costs, guests, the clock and the roster are Pro; tables and accounts are for everyone.
+    live: live && !isPro(row) ? { ...live, lowStock: [], expiring: [], costAlerts: [], customers: undefined, onClock: undefined, roster: undefined } : live
 
   };
 }
@@ -206,7 +235,7 @@ export async function summary(db: D1Database, branches: BranchRow[], range: Rang
   const [perBranch, days, hours, channels, payments, refunds] = await db.batch<Record<string, any>>([
     db.prepare(`SELECT d.license_id AS licenseId, COUNT(*) AS days, SUM(complete = 0) AS openDays, ${SUM_TOTALS} FROM stats_day d WHERE ${IN_RANGE} GROUP BY d.license_id`).bind(...shown),
     db.prepare(`SELECT d.business_date AS businessDate, SUM(tickets) AS tickets, SUM(net) AS net FROM stats_day d WHERE ${IN_RANGE} GROUP BY 1 ORDER BY 1`).bind(...shown),
-    section("hours", "hour", hourly, "tickets", "net"),
+    section("hours", "hour", hourly, "tickets", "net", "people"),
     section("channels", "channel", pro, "tickets", "net"),
     section("payments", "method", pro, "amount", "tips", "count"),
     section("refunds", "method", pro, "amount", "count")
@@ -238,7 +267,7 @@ export async function products(db: D1Database, branches: BranchRow[], range: Ran
 }
 
 // Staff, cash and closings are Pro areas whole: a Lite branch never enters them.
-const proOnly = (branches: BranchRow[], range: Range) => { const { pro, lite, outOfRange } = plans(branches, range); return { pro, marks: { lite, outOfRange } }; };
+export const proOnly = (branches: BranchRow[], range: Range) => { const { pro, lite, outOfRange } = plans(branches, range); return { pro, marks: { lite, outOfRange } }; };
 
 export async function staff(db: D1Database, branches: BranchRow[], range: Range) {
 
@@ -263,7 +292,7 @@ export async function cash(db: D1Database, every: BranchRow[], range: Range) {
   return { ...range, ...marks, cash: { income: row.income ?? 0, expense: row.expense ?? 0, withdrawal: row.withdrawal ?? 0 }, inventory: { waste: row.waste ?? 0, shortage: row.shortage ?? 0, surplus: row.surplus ?? 0 }, closes: closes!.results.map((c) => ({ ...c, blind: c.blind === 1 })) };
 }
 
-const dayShift = (value: string, days: number) => new Date(Date.parse(value) + days * 86_400_000).toISOString().slice(0, 10);
+export const dayShift = (value: string, days: number) => new Date(Date.parse(value) + days * 86_400_000).toISOString().slice(0, 10);
 
 /** Each close beside what the panel counts for it. A difference means an account was reopened after that close. */
 export async function closings(db: D1Database, every: BranchRow[], range: Range) {
