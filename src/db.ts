@@ -4,9 +4,10 @@ import deleted from "../migrations/0003_licencia_eliminada.sql";
 import released from "../migrations/0004_llave_liberada.sql";
 import faults from "../migrations/0005_fallos.sql";
 import ownerPanel from "../migrations/0006_panel_propietario.sql";
+import revenue from "../migrations/0007_ganancias.sql";
 import { DAY_MS } from "./catalog";
 
-const MIGRATIONS: [name: string, sql: string][] = [["0001_inicial.sql", initial], ["0002_nivel_y_addons.sql", tiers], ["0003_licencia_eliminada.sql", deleted], ["0004_llave_liberada.sql", released], ["0005_fallos.sql", faults], ["0006_panel_propietario.sql", ownerPanel]];
+const MIGRATIONS: [name: string, sql: string][] = [["0001_inicial.sql", initial], ["0002_nivel_y_addons.sql", tiers], ["0003_licencia_eliminada.sql", deleted], ["0004_llave_liberada.sql", released], ["0005_fallos.sql", faults], ["0006_panel_propietario.sql", ownerPanel], ["0007_ganancias.sql", revenue]];
 const TRACKING = "CREATE TABLE IF NOT EXISTS d1_migrations (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL)";
 let ready: Promise<void> | undefined;
 

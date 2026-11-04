@@ -491,6 +491,8 @@ Licencia en el panel:
 
 Cada cambio sube `revision`; la sucursal lo recibe en su siguiente renovación. Una licencia revocada no admite cambios (`409`).
 
+`POST /licenses`, `PATCH /licenses/{id}` y `POST /licenses/{id}/renew` aceptan además `charge`: centavos de MXN sin IVA (entero, 0 a 100 000 000). Es lo que se le cobró al cliente y gana sobre la lista de precios (§5.8).
+
 ### 5.3 Versiones y publicaciones
 
 Subida a R2 por partes, para paquetes de cualquier tamaño:
@@ -562,6 +564,28 @@ Mientras no haya correo, quien pierde su contraseña o su autenticador recupera 
 | `POST /admin/v1/faults/{id}/reopen` | `{ "fault": Fault }`, queda en la bitácora |
 
 `Fault` lleva los campos de §4.8 menos `fingerprint`, más `id`, `licenseId`, `customer`, `branchName`, `siteId`, `status`, `resolvedAt` y `resolvedBy`. Los resueltos se borran a los 90 días.
+
+### 5.8 Precios y ganancias
+
+Todos los montos van en centavos de MXN sin IVA.
+
+| Método y ruta | Cuerpo | Efecto |
+|---|---|---|
+| `GET /admin/v1/prices` | | `{ "prices": Precios \| null, "updatedAt": "<ISO>" \| null }` |
+| `PUT /admin/v1/prices` | `Precios` | Guarda una lista nueva. Vale desde ese momento; los cobros ya registrados no cambian. Queda en la bitácora como `prices.update` |
+| `GET /admin/v1/revenue` | | Resumen descrito abajo |
+
+```json
+{
+  "tiers": { "lite": { "monthly": 89900, "annual": 899000, "permanent": 2490000 }, "pro": { "monthly": 169000, "annual": 1690000, "permanent": 4490000 } },
+  "addons": { "mobileOrdering": 29000, "deliveryHub": 49000, "webOrdering": 39000 },
+  "combos": { "pyme": 109900, "delivery": 239000 }
+}
+```
+
+**Cobros.** Se registra un cobro al crear una licencia de pago, al renovarla y al cambiarla de plan (cambiar sólo nivel o complementos no cobra). El monto es `charge` si viene, y si no, el precio de lista: mensual = nivel + complementos (o el combo, si la licencia coincide con uno); anual = nivel anual + complementos × 12; de por vida = un pago del nivel. Renovar hasta una fecha cobra los meses o años enteros que cubre, al menos uno. Una prueba nunca cobra, y sin lista de precios ni `charge` no se registra nada.
+
+**Resumen** (`/revenue`): `months` son los 12 meses hasta el actual en hora de la Ciudad de México, con lo cobrado en `lite`, `pro`, `addons`, `permanent` y `total`. `recurring` es el valor mensual de las licencias activas: el último cobro dividido entre sus meses si el plan no cambió, si no el precio de lista; las de por vida aportan sólo sus complementos. Lleva `total`, `payingLicenses`, `perLicense` y `mix` (`liteMonthly`, `liteAnnual`, `proMonthly`, `proAnnual`, `addons`). `collected` trae `thisMonth` y `lastMonth`. `atRisk` suma el siguiente periodo de las licencias activas que vencen en 30 días. `top` son las cinco empresas que más dejan al mes. `perLicense[id]` trae `monthly` y `lastCharge`.
 
 ## 6. Panel del propietario (`/owner/v1`)
 

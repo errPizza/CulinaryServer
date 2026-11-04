@@ -9,6 +9,8 @@ export type Tier = (typeof TIERS)[number];
 export const TIER_TERMINALS: Record<Tier, number> = { lite: 2, pro: 10 };
 // Paid add-ons on top of either tier. Fiscal stamps are billed per use, not licensed.
 export const ADDONS = ["mobileOrdering", "deliveryHub", "webOrdering"] as const;
+// Sold together at their own monthly price. Keep in step with COMBOS in CulinaryAdmin src/api.ts.
+export const COMBOS = [{ id: "pyme", tier: "lite", addons: ["mobileOrdering"] }, { id: "delivery", tier: "pro", addons: ["deliveryHub", "webOrdering"] }] as const;
 export const addonsSchema = z.array(z.enum(ADDONS)).max(ADDONS.length).transform((list) => [...new Set(list)].sort());
 export const PLATFORMS = ["linux-x64", "win-x64", "android-arm64"] as const;
 export const DAY_MS = 24 * 60 * 60 * 1000;

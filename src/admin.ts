@@ -9,6 +9,7 @@ import { adminFaults, FAULT_STATUSES, reopenFault, resolveFault } from "./faults
 import { ApiError, parse, readJson, uniqueOr409, type App } from "./http";
 import { ownerAdmin } from "./owner";
 import { features, getLicense, LICENSE_STATUSES, licenseStatus, licenseView, nextExpiry, type LicenseRow } from "./licenses";
+import { chargeSchema, chargeStatement, currentPrices, periodsUntil, pricesSchema, revenue } from "./revenue";
 import { addTicketMessage, adminTickets, closeTicket, ticketDetail, TICKET_STATUSES } from "./tickets";
 import { abortRelease, attachManifest, completeRelease, completeSchema, createRelease, listPublications, listReleases, manifestSchema, publicationSchema, publish, releaseSchema, uploadPart, withdraw } from "./updates";
 
@@ -27,7 +28,8 @@ const createSchema = z.strictObject({
   addons: addonsSchema.default([]),
   trialDays: trialDays.optional(),
   features: featuresSchema,
-  limits: limitsSchema
+  limits: limitsSchema,
+  charge: chargeSchema
 
 }).refine((l) => (l.plan === "trial") === (l.trialDays !== undefined), { message: "trialDays va solo con el plan de prueba", path: ["trialDays"] });
 
@@ -42,7 +44,8 @@ const editSchema = z.strictObject({
   features: featuresSchema.optional(),
   limits: limitsSchema.optional(),
   expiresAt: futureDate.optional(),
-  siteId: slug(32).optional()
+  siteId: slug(32).optional(),
+  charge: chargeSchema
 
 });
 
@@ -101,7 +104,9 @@ admin.post("/licenses", async (c) => {
   const activation = await issueHumanCode();
   const insert = c.env.DB.prepare(`INSERT INTO license (id, tenant_id, site_id, customer, branch_name, plan, tier, addons, trial_days, features, limits, revision, created_at, activation_code_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?) RETURNING *`).bind(id, input.tenantId ?? crypto.randomUUID(), input.siteId, input.customer, input.branchName, input.plan, input.tier, JSON.stringify(input.addons), input.trialDays ?? null, JSON.stringify(input.features), JSON.stringify(input.limits), new Date().toISOString(), activation.hash).first<LicenseRow>();
   const row = await uniqueOr409(insert, "Ese siteId ya tiene licencia");
-  
+  const charge = await chargeStatement(c.env.DB, row!, "sale", c.var.admin.id, { amount: input.charge });
+
+  if (charge) await charge.run();
   await audit(c.env.DB, c.var.admin.id, "license.create", id, input);
  
   return c.json({ license: licenseView(row!), activationCode: activation.code }, 201);
@@ -148,7 +153,10 @@ admin.patch("/licenses/:id", async (c) => {
 
   ).first<LicenseRow>();
   const updated = await uniqueOr409(update, "Ese siteId ya tiene licencia");
+  // Moving to another plan is a new sale; changing only the tier or add-ons waits for the next renewal.
+  const charge = plan !== row.plan ? await chargeStatement(c.env.DB, updated!, "plan_change", c.var.admin.id, { amount: input.charge }) : null;
 
+  if (charge) await charge.run();
   await audit(c.env.DB, c.var.admin.id, "license.edit", row.id, input);
 
   return c.json({ license: licenseView(updated!) });
@@ -169,7 +177,7 @@ admin.delete("/licenses/:id", async (c) => {
 
 admin.post("/licenses/:id/renew", async (c) => {
 
-  const input = await readJson(c, z.strictObject({ until: futureDate.optional() }));
+  const input = await readJson(c, z.strictObject({ until: futureDate.optional(), charge: chargeSchema }));
   const row = await editable(c.env.DB, c.req.param("id"));
   
   if (row.plan === "permanent") throw new ApiError(409, "conflict", "La licencia permanente no vence");
@@ -178,8 +186,10 @@ admin.post("/licenses/:id/renew", async (c) => {
   const from = new Date(Math.max(Date.now(), row.expires_at ? Date.parse(row.expires_at) : 0));
   const until = input.until ? new Date(input.until) : termEnd(row.plan, row.trial_days, from)!;
   const updated = await c.env.DB.prepare("UPDATE license SET expires_at = ?, revision = revision + 1 WHERE id = ? RETURNING *").bind(until.toISOString(), row.id).first<LicenseRow>();
- 
-  await audit(c.env.DB, c.var.admin.id, "license.renew", row.id, { from: row.expires_at, until: until.toISOString() });
+  const charge = await chargeStatement(c.env.DB, updated!, "renewal", c.var.admin.id, { periods: input.until ? periodsUntil(row.plan, from, until) : 1, amount: input.charge });
+
+  if (charge) await charge.run();
+  await audit(c.env.DB, c.var.admin.id, "license.renew", row.id, { from: row.expires_at, until: until.toISOString(), ...(input.charge !== undefined ? { charge: input.charge } : {}) });
   
   return c.json({ license: licenseView(updated!) });
 });
@@ -206,6 +216,27 @@ admin.post("/licenses/:id/reset-activation", async (c) => {
 
   return c.json({ license: licenseView(updated!), activationCode: activation.code });
 });
+
+admin.get("/prices", async (c) => {
+
+  const listed = await currentPrices(c.env.DB);
+
+  return c.json({ prices: listed?.prices ?? null, updatedAt: listed?.at ?? null });
+});
+
+// Applies from now on: charges already recorded keep the amount they were sold at.
+admin.put("/prices", async (c) => {
+
+  const prices = await readJson(c, pricesSchema);
+  const at = new Date().toISOString();
+
+  await c.env.DB.prepare("INSERT INTO price_list (at, admin_id, prices) VALUES (?, ?, ?)").bind(at, c.var.admin.id, JSON.stringify(prices)).run();
+  await audit(c.env.DB, c.var.admin.id, "prices.update", null, prices);
+
+  return c.json({ prices, updatedAt: at });
+});
+
+admin.get("/revenue", async (c) => c.json(await revenue(c.env.DB)));
 
 admin.get("/registry", async (c) => {
 
