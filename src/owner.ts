@@ -7,6 +7,8 @@ import { ApiError, bearerHash, parse, parseJson, readJson, type App, type Ctx, t
 import { branchView, cash, closings, products, rangeSchema, staff, summary, type BranchRow } from "./stats";
 import { alerts, customers, goals, kitchen, menu, profit, readSettings, settingsSchema, summaryExtras, team, trend, writeSettings } from "./insights";
 import { forecast } from "./forecast";
+import { sendToBranches, thread, threads } from "./messages";
+import { addTicketMessage, createTicket, ownerTicket, ownerTickets } from "./tickets";
 
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -282,6 +284,56 @@ owner.get("/geocode", async (c) => {
   const body = await response.json() as { results?: { name: string; admin1?: string; country?: string; latitude: number; longitude: number }[] };
 
   return c.json({ places: (body.results ?? []).map((p) => ({ label: [p.name, p.admin1, p.country].filter(Boolean).join(", "), lat: p.latitude, lon: p.longitude })) });
+});
+
+// Messages: the owner's thread with each branch, and what the person asks the provider's support.
+const messageText = z.string().trim().min(1).max(2000);
+
+owner.get("/messages", async (c) => {
+
+  const branches = await reachable(c);
+
+  return c.json({ branches: await threads(c.env.DB, c.var.owner.id, branches.map((b) => b.id)), support: await ownerTickets(c.env.DB, c.var.owner.id) });
+});
+
+owner.get("/messages/branches/:licenseId", async (c) => {
+
+  const [chosen] = await chosenBranches(c, c.req.param("licenseId"));
+
+  return c.json({ messages: await thread(c.env.DB, c.var.owner.id, chosen!.id) });
+});
+
+// To one branch, to several, or with an empty list to every branch this person reads.
+owner.post("/messages/branches", async (c) => {
+
+  const input = await readJson(c, z.strictObject({ licenseIds: z.array(z.string().max(64)).max(100), message: messageText }));
+  const own = await reachable(c);
+  const ids = input.licenseIds.length ? [...new Set(input.licenseIds)] : own.map((b) => b.id);
+
+  if (!ids.length || !ids.every((id) => own.some((b) => b.id === id))) throw new ApiError(404, "not_found", "Sucursal no encontrada");
+
+  return c.json(await sendToBranches(c.env.DB, c.var.owner, ids, input.message), 201);
+});
+
+owner.post("/support", async (c) => {
+
+  const input = await readJson(c, z.strictObject({ licenseId: z.string().max(64).optional(), subject: z.string().trim().min(1).max(150), message: z.string().trim().min(1).max(4000) }));
+  const own = await reachable(c);
+  // A question about the business as a whole still hangs from one of its branches, so support sees whose it is.
+  const about = input.licenseId ? own.find((b) => b.id === input.licenseId) : own[0];
+
+  if (!about) throw new ApiError(404, "not_found", "Sucursal no encontrada");
+
+  return c.json({ ticket: await createTicket(c.env.DB, about.id, input.subject, input.message, c.var.owner.id) }, 201);
+});
+
+owner.get("/support/:id", async (c) => c.json({ ticket: await ownerTicket(c.env.DB, c.var.owner.id, c.req.param("id")) }));
+
+owner.post("/support/:id/messages", async (c) => {
+
+  const input = await readJson(c, z.strictObject({ message: z.string().trim().min(1).max(4000) }));
+
+  return c.json({ ticket: await addTicketMessage(c.env.DB, c.req.param("id"), { kind: "owner", accountId: c.var.owner.id }, input.message) }, 201);
 });
 
 const inviteSchema = z.strictObject({

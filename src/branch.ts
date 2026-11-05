@@ -8,6 +8,7 @@ import { audit } from "./db";
 import { faultsSchema, recordFaults } from "./faults";
 import { findLicense, licenseToken, requireUsable, statusNotice, type LicenseRow } from "./licenses";
 import { consumeChallenge, issueChallenge, readSigned, signedBy, verifySigned } from "./signature";
+import { branchReply, branchThread } from "./messages";
 import { MAX_STATS_BYTES, recordStats, statsSchema } from "./stats";
 import { addTicketMessage, branchTickets, createTicket } from "./tickets";
 import { checkForUpdate, latestReleases, streamDownload } from "./updates";
@@ -173,6 +174,26 @@ branch.post("/tickets/:id/messages", async (c) => {
   await requireUsable(c.env, license, { allowExpired: true, challenge });
 
   return c.json({ ticket: await addTicketMessage(c.env.DB, c.req.param("id"), { kind: "branch", licenseId: license.id }, input.message) }, 201);
+});
+
+// The owner's thread, read by the branch's managers in the point of sale. A branch that lost its license still hears from its owner.
+branch.get("/owner-messages", async (c) => {
+
+  const { license, challenge } = await authenticate(c);
+
+  await requireUsable(c.env, license, { allowExpired: true, challenge });
+
+  return c.json({ messages: await branchThread(c.env.DB, license.id) });
+});
+
+branch.post("/owner-messages", async (c) => {
+
+  const { license, body, challenge } = await authenticate(c);
+  const input = parseJson(z.strictObject({ id: z.string().min(1).max(64), name: z.string().trim().min(1).max(80), message: z.string().trim().min(1).max(2000) }), body);
+
+  await requireUsable(c.env, license, { allowExpired: true, challenge });
+
+  return c.json(await branchReply(c.env.DB, license.id, input.id, input.name, input.message), 201);
 });
 
 // A branch with an expired license is still a branch that can fail, and is the one most likely to call about it.
