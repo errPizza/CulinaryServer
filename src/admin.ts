@@ -4,7 +4,9 @@ import { requireAdmin } from "./admin-auth";
 import { addonsSchema, featuresSchema, limitsSchema, PLANS, termEnd, TIERS, type Plan } from "./catalog";
 import { ed25519Spki, issueHumanCode, toBase64Url } from "./crypto";
 import { keyFloor, licenseSigner, rootPublic } from "./keys";
-import { audit } from "./db";
+import { audit, auditStatement } from "./db";
+import { requireFiscal } from "./fiscal";
+import { fiscalSchema } from "./sat";
 import { adminFaults, FAULT_STATUSES, reopenFault, resolveFault } from "./faults";
 import { ApiError, parse, readJson, uniqueOr409, type App } from "./http";
 import { ownerAdmin } from "./owner";
@@ -29,6 +31,8 @@ const createSchema = z.strictObject({
   trialDays: trialDays.optional(),
   features: featuresSchema,
   limits: limitsSchema,
+  // The business as its Constancia de Situación Fiscal states it: no license is created without it.
+  fiscal: fiscalSchema,
   charge: chargeSchema
 
 }).refine((l) => (l.plan === "trial") === (l.trialDays !== undefined), { message: "trialDays va solo con el plan de prueba", path: ["trialDays"] });
@@ -45,6 +49,7 @@ const editSchema = z.strictObject({
   limits: limitsSchema.optional(),
   expiresAt: futureDate.optional(),
   siteId: slug(32).optional(),
+  fiscal: fiscalSchema.optional(),
   charge: chargeSchema
 
 });
@@ -102,14 +107,16 @@ admin.post("/licenses", async (c) => {
   const input = await readJson(c, createSchema);
   const id = crypto.randomUUID();
   const activation = await issueHumanCode();
-  const insert = c.env.DB.prepare(`INSERT INTO license (id, tenant_id, site_id, customer, branch_name, plan, tier, addons, trial_days, features, limits, revision, created_at, activation_code_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?) RETURNING *`).bind(id, input.tenantId ?? crypto.randomUUID(), input.siteId, input.customer, input.branchName, input.plan, input.tier, JSON.stringify(input.addons), input.trialDays ?? null, JSON.stringify(input.features), JSON.stringify(input.limits), new Date().toISOString(), activation.hash).first<LicenseRow>();
-  const row = await uniqueOr409(insert, "Ese siteId ya tiene licencia");
-  const charge = await chargeStatement(c.env.DB, row!, "sale", c.var.admin.id, { amount: input.charge });
+  const at = new Date().toISOString();
+  const { fiscal } = input;
+  const insert = c.env.DB.prepare(`INSERT INTO license (id, tenant_id, site_id, customer, branch_name, plan, tier, addons, trial_days, features, limits, revision, created_at, activation_code_hash, fiscal_rfc, fiscal_name, fiscal_postal_code, fiscal_regime) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?) RETURNING *`).bind(id, input.tenantId ?? crypto.randomUUID(), input.siteId, input.customer, input.branchName, input.plan, input.tier, JSON.stringify(input.addons), input.trialDays ?? null, JSON.stringify(input.features), JSON.stringify(input.limits), at, activation.hash, fiscal.rfc, fiscal.name, fiscal.postalCode, fiscal.regime);
+  // The charge only needs what the license is sold as, so the license, its charge and the audit entry commit together.
+  const draft = { id, plan: input.plan, tier: input.tier, addons: JSON.stringify(input.addons) } as LicenseRow;
+  const charge = await chargeStatement(c.env.DB, draft, "sale", c.var.admin.id, { amount: input.charge });
+  const [created] = await uniqueOr409(c.env.DB.batch([insert, ...(charge ? [charge] : []), auditStatement(c.env.DB, c.var.admin.id, "license.create", id, input)]), "Ese siteId ya tiene licencia");
+  const row = (created!.results as LicenseRow[])[0]!;
 
-  if (charge) await charge.run();
-  await audit(c.env.DB, c.var.admin.id, "license.create", id, input);
- 
-  return c.json({ license: licenseView(row!), activationCode: activation.code }, 201);
+  return c.json({ license: licenseView(row), activationCode: activation.code }, 201);
 });
 
 admin.get("/licenses", async (c) => {
@@ -137,7 +144,7 @@ admin.patch("/licenses/:id", async (c) => {
 
   const expiresAt = nextExpiry(row, plan, days, input);
 
-  const update = c.env.DB.prepare("UPDATE license SET site_id = ?, customer = ?, branch_name = ?, plan = ?, tier = ?, addons = ?, trial_days = ?, features = ?, limits = ?, expires_at = ?, revision = revision + 1 WHERE id = ? RETURNING *").bind(
+  const update = c.env.DB.prepare("UPDATE license SET site_id = ?, customer = ?, branch_name = ?, plan = ?, tier = ?, addons = ?, trial_days = ?, features = ?, limits = ?, expires_at = ?, fiscal_rfc = ?, fiscal_name = ?, fiscal_postal_code = ?, fiscal_regime = ?, revision = revision + 1 WHERE id = ? RETURNING *").bind(
 
     input.siteId ?? row.site_id,
     input.customer ?? row.customer,
@@ -149,6 +156,10 @@ admin.patch("/licenses/:id", async (c) => {
     input.features ? JSON.stringify(input.features) : row.features,
     input.limits ? JSON.stringify(input.limits) : row.limits,
     expiresAt,
+    input.fiscal?.rfc ?? row.fiscal_rfc,
+    input.fiscal?.name ?? row.fiscal_name,
+    input.fiscal?.postalCode ?? row.fiscal_postal_code,
+    input.fiscal?.regime ?? row.fiscal_regime,
     row.id
 
   ).first<LicenseRow>();
@@ -209,6 +220,9 @@ admin.post("/licenses/:id/reset-activation", async (c) => {
 
   const input = await readJson(c, z.strictObject({ reason: z.string().trim().min(1).max(500) }));
   const row = await editable(c.env.DB, c.req.param("id"));
+
+  requireFiscal(row);
+
   const activation = await issueHumanCode();
   const updated = await c.env.DB.prepare(`UPDATE license SET activation_code_hash = ?, released_alg = COALESCE(key_alg, released_alg), released_spki = COALESCE(key_spki, released_spki), key_alg = NULL, key_spki = NULL, binding_kind = NULL, fp_board = NULL, fp_disk = NULL, fp_mac = NULL, central_cert_sha256 = NULL, revision = revision + 1 WHERE id = ? RETURNING *`).bind(activation.hash, row.id).first<LicenseRow>();
  

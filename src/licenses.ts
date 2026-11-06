@@ -3,6 +3,7 @@ import { type KeyAlg } from "./crypto";
 import { audit } from "./db";
 import { licenseSigner, signJws } from "./keys";
 import { ApiError, type Env } from "./http";
+import { licenseFiscal } from "./fiscal";
 
 export type LicenseRow = {
 
@@ -35,6 +36,10 @@ export type LicenseRow = {
   validated_at: string | null;
   central_cert_sha256: string | null;
   deleted_at: string | null;
+  fiscal_rfc: string | null;
+  fiscal_name: string | null;
+  fiscal_postal_code: string | null;
+  fiscal_regime: string | null;
 
 };
 
@@ -107,7 +112,9 @@ export function licenseView(row: LicenseRow) {
     revokedAt: row.revoked_at,
     revokeReason: row.revoke_reason,
     binding: row.binding_kind ? { kind: row.binding_kind, keyAlg: row.key_alg } : null,
-    centralCertificateSha256: row.central_cert_sha256
+    centralCertificateSha256: row.central_cert_sha256,
+    fiscal: licenseFiscal(row),
+    fiscalComplete: licenseFiscal(row) !== null
 
   };
 }
@@ -137,7 +144,9 @@ export async function licenseToken(env: Env, row: LicenseRow): Promise<string> {
     validatedAt,
     offlineUntil: new Date(Date.parse(validatedAt) + OFFLINE_GRACE_MS).toISOString(),
     key: { alg: row.key_alg, spki: row.key_spki },
-    binding: row.binding_kind
+    binding: row.binding_kind,
+    // The branch compares the RFC of the CSD the owner sends against this one, signed by the provider.
+    ...(licenseFiscal(row) ? { fiscal: licenseFiscal(row) } : {})
 
   });
 

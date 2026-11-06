@@ -9,6 +9,8 @@ import { alerts, customers, goals, kitchen, menu, profit, readSettings, settings
 import { forecast } from "./forecast";
 import { sendToBranches, thread, threads } from "./messages";
 import { addTicketMessage, createTicket, ownerTicket, ownerTickets } from "./tickets";
+import { fiscalStatus, submissionSchema, submitCsd } from "./fiscal";
+import { getLicense } from "./licenses";
 
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -284,6 +286,32 @@ owner.get("/geocode", async (c) => {
   const body = await response.json() as { results?: { name: string; admin1?: string; country?: string; latitude: number; longitude: number }[] };
 
   return c.json({ places: (body.results ?? []).map((p) => ({ label: [p.name, p.admin1, p.country].filter(Boolean).join(", "), lat: p.latitude, lon: p.longitude })) });
+});
+
+// Invoicing: only the account's owner, never a manager, sees and changes the CSD of the branches.
+function requireAccountOwner(c: Ctx) {
+
+  if (c.var.owner.role !== "owner") throw new ApiError(403, "forbidden", "Sólo el dueño de la cuenta configura la facturación");
+}
+
+owner.get("/fiscal", async (c) => {
+
+  requireAccountOwner(c);
+
+  const branches = await reachable(c);
+
+  return c.json({ branches: await Promise.all(branches.map((b) => getLicense(c.env.DB, b.id).then((row) => fiscalStatus(c.env.DB, row)))) });
+});
+
+// The body is an envelope only the branch can open; this server checks its shape and keeps it for a day at most.
+owner.post("/fiscal/:licenseId/csd", async (c) => {
+
+  requireAccountOwner(c);
+
+  const [chosen] = await chosenBranches(c, c.req.param("licenseId"));
+  const input = await readJson(c, submissionSchema);
+
+  return c.json(await submitCsd(c.env.DB, c.var.owner, await getLicense(c.env.DB, chosen!.id), input), 202);
 });
 
 // Messages: the owner's thread with each branch, and what the person asks the provider's support.

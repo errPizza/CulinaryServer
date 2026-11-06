@@ -107,8 +107,12 @@ export function signedAdmin(session: AdminSession, method: string, path: string,
 
 export const fingerprint = { board: "a".repeat(64), disk: "b".repeat(64), mac: "c".repeat(64) };
 
+// The SAT's test taxpayer, the one its sandbox CSD belongs to.
+export const FISCAL = { rfc: "EKU9003173C9", name: "ESCUELA KEMPER URGATE", postalCode: "42501", regime: "601" };
+
 export async function createLicense(token: string, overrides: Record<string, unknown> = {}) {
   const body = {
+    fiscal: FISCAL,
     customer: "Restaurante La Plaza",
     branchName: "Centro",
     siteId: `sitio-${crypto.randomUUID().slice(0, 8)}`,

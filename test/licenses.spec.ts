@@ -2,7 +2,7 @@ import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import { DAY_MS, termEnd } from "../src/catalog";
 import { nextExpiry, type LicenseRow } from "../src/licenses";
-import { activate, activatedBranch, call, challenge, createLicense, firstAdmin, fingerprint, json, newDevice, signed, verifyJws, type Device } from "./helpers";
+import { activate, activatedBranch, call, challenge, createLicense, FISCAL, firstAdmin, fingerprint, json, newDevice, signed, verifyJws, type Device } from "./helpers";
 
 const renew = (device: Device, licenseId: string, body: unknown = { fingerprint }, nonce?: string) =>
   signed("branch", device, licenseId, "POST", "/branch/v1/license/renew", { body, nonce });
@@ -230,7 +230,7 @@ describe("edición desde el panel", () => {
   it("no repite siteId y valida los días de prueba", async () => {
     const { token } = await firstAdmin();
     const { license } = await createLicense(token);
-    const base = { customer: "x", branchName: "y", plan: "monthly", tier: "pro", features: [], limits: { maxUsers: 1, maxTables: 1 } };
+    const base = { customer: "x", branchName: "y", plan: "monthly", tier: "pro", features: [], limits: { maxUsers: 1, maxTables: 1 }, fiscal: FISCAL };
     expect((await json(await call("POST", "/admin/v1/licenses", { token, body: { ...base, siteId: license.siteId } }), 409)).error.code).toBe("conflict");
     expect((await call("POST", "/admin/v1/licenses", { token, body: { ...base, siteId: "otra", plan: "trial" } })).status).toBe(400);
   });

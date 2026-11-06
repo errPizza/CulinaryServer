@@ -7,9 +7,11 @@ import ownerPanel from "../migrations/0006_panel_propietario.sql";
 import revenue from "../migrations/0007_ganancias.sql";
 import insights from "../migrations/0008_metricas_avanzadas.sql";
 import messages from "../migrations/0009_mensajes.sql";
+import fiscal from "../migrations/0010_datos_fiscales.sql";
+import { expireSubmissions } from "./fiscal";
 import { DAY_MS } from "./catalog";
 
-const MIGRATIONS: [name: string, sql: string][] = [["0001_inicial.sql", initial], ["0002_nivel_y_addons.sql", tiers], ["0003_licencia_eliminada.sql", deleted], ["0004_llave_liberada.sql", released], ["0005_fallos.sql", faults], ["0006_panel_propietario.sql", ownerPanel], ["0007_ganancias.sql", revenue], ["0008_metricas_avanzadas.sql", insights], ["0009_mensajes.sql", messages]];
+const MIGRATIONS: [name: string, sql: string][] = [["0001_inicial.sql", initial], ["0002_nivel_y_addons.sql", tiers], ["0003_licencia_eliminada.sql", deleted], ["0004_llave_liberada.sql", released], ["0005_fallos.sql", faults], ["0006_panel_propietario.sql", ownerPanel], ["0007_ganancias.sql", revenue], ["0008_metricas_avanzadas.sql", insights], ["0009_mensajes.sql", messages], ["0010_datos_fiscales.sql", fiscal]];
 const TRACKING = "CREATE TABLE IF NOT EXISTS d1_migrations (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL)";
 let ready: Promise<void> | undefined;
 
@@ -71,13 +73,20 @@ export async function purgeExpired(db: D1Database, at: number): Promise<void> {
     db.prepare("DELETE FROM owner_account WHERE active = 0 AND created_at < ?").bind(new Date(at - DAY_MS).toISOString()),
     db.prepare("UPDATE stats_day SET products = NULL WHERE business_date < ? AND products IS NOT NULL").bind(new Date(at - 396 * DAY_MS).toISOString().slice(0, 10)),
     db.prepare("DELETE FROM stats_day WHERE business_date < ?").bind(new Date(at - 762 * DAY_MS).toISOString().slice(0, 10)),
-    db.prepare("DELETE FROM admin WHERE active = 0 AND created_at < ?").bind(new Date(at - DAY_MS).toISOString())
+    db.prepare("DELETE FROM admin WHERE active = 0 AND created_at < ?").bind(new Date(at - DAY_MS).toISOString()),
+    expireSubmissions(db, at)
   ]);
 
 }
 
 export async function audit(db: D1Database, adminId: string | null, action: string, target: string | null, detail: unknown = null): Promise<void> {
 
-  await db.prepare("INSERT INTO audit (at, admin_id, action, target, detail) VALUES (?, ?, ?, ?, ?)").bind(new Date().toISOString(), adminId, action, target, detail === null ? null : JSON.stringify(detail)).run();
+  await auditStatement(db, adminId, action, target, detail).run();
 
+}
+
+/** The same entry as a statement, to commit it in one batch with the change it records. */
+export function auditStatement(db: D1Database, adminId: string | null, action: string, target: string | null, detail: unknown = null): D1PreparedStatement {
+
+  return db.prepare("INSERT INTO audit (at, admin_id, action, target, detail) VALUES (?, ?, ?, ?, ?)").bind(new Date().toISOString(), adminId, action, target, detail === null ? null : JSON.stringify(detail));
 }

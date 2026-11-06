@@ -9,6 +9,7 @@ import { faultsSchema, recordFaults } from "./faults";
 import { findLicense, licenseToken, requireUsable, statusNotice, type LicenseRow } from "./licenses";
 import { consumeChallenge, issueChallenge, readSigned, signedBy, verifySigned } from "./signature";
 import { branchReply, branchThread } from "./messages";
+import { intakeSchema, pendingFor, registerIntake, requireFiscal, resolveSubmission, resultSchema } from "./fiscal";
 import { MAX_STATS_BYTES, recordStats, statsSchema } from "./stats";
 import { addTicketMessage, branchTickets, createTicket } from "./tickets";
 import { checkForUpdate, latestReleases, streamDownload } from "./updates";
@@ -81,6 +82,8 @@ branch.post("/activate", async (c) => {
   if (!(await sameSecret(await hashHumanCode(input.activationCode), license.activation_code_hash))) throw invalid;
   // Checked before anything is written, so a branch with another siteId neither spends the code nor binds its key.
   if (input.siteId !== license.site_id) throw new ApiError(409, "site_mismatch", `La licencia es de la sucursal ${license.site_id}, no de ${input.siteId}`);
+  // No software is activated for a business without its tax data; a code issued before the data existed waits for it too.
+  requireFiscal(license);
 
   await licenseSigner(c.env);
 
@@ -194,6 +197,36 @@ branch.post("/owner-messages", async (c) => {
   await requireUsable(c.env, license, { allowExpired: true, challenge });
 
   return c.json(await branchReply(c.env.DB, license.id, input.id, input.name, input.message), 201);
+});
+
+// The key the owner's CSD is sealed to. The request is signed by the license key, so it can only come from the machine that holds it.
+branch.put("/fiscal/intake-key", async (c) => {
+
+  const { license, body, challenge } = await authenticate(c);
+  const input = parseJson(intakeSchema, body);
+
+  await requireUsable(c.env, license, { challenge });
+
+  return c.json(await registerIntake(c.env.DB, license.id, input.spki));
+});
+
+branch.get("/fiscal/submissions", async (c) => {
+
+  const { license, challenge } = await authenticate(c);
+
+  await requireUsable(c.env, license, { challenge });
+
+  return c.json({ submissions: await pendingFor(c.env.DB, license.id) });
+});
+
+branch.post("/fiscal/submissions/:id/result", async (c) => {
+
+  const { license, body, challenge } = await authenticate(c);
+  const input = parseJson(resultSchema, body);
+
+  await requireUsable(c.env, license, { allowExpired: true, challenge });
+
+  return c.json(await resolveSubmission(c.env.DB, license.id, c.req.param("id"), input));
 });
 
 // A branch with an expired license is still a branch that can fail, and is the one most likely to call about it.
