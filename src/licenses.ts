@@ -15,6 +15,7 @@ export type LicenseRow = {
   plan: Plan;
   tier: Tier;
   addons: string;
+  integrations: string | null;
   trial_days: number | null;
   features: string;
   limits: string;
@@ -57,6 +58,8 @@ export function licenseStatus(row: LicenseRow, at = Date.now()): LicenseStatus {
 
 export const features = (row: LicenseRow) => JSON.parse(row.features) as string[];
 export const addons = (row: LicenseRow) => JSON.parse(row.addons) as string[];
+// null: a license from before the list existed, which keeps every integration.
+export const integrations = (row: LicenseRow) => (row.integrations === null || row.integrations === undefined ? null : JSON.parse(row.integrations) as string[]);
 // maxTerminals left unset follows the tier, so moving Lite to Pro raises it without editing limits.
 export function limits(row: LicenseRow): Required<Limits> {
 
@@ -100,6 +103,7 @@ export function licenseView(row: LicenseRow) {
     plan: row.plan,
     tier: row.tier,
     addons: addons(row),
+    integrations: integrations(row),
     trialDays: row.trial_days,
     features: features(row),
     limits: limits(row),
@@ -136,6 +140,7 @@ export async function licenseToken(env: Env, row: LicenseRow): Promise<string> {
     plan: row.plan,
     tier: row.tier,
     addons: addons(row),
+    ...(integrations(row) ? { integrations: integrations(row) } : {}),
     status: "active",
     features: features(row),
     limits: limits(row),

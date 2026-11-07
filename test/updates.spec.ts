@@ -117,9 +117,31 @@ describe("actualizaciones", () => {
   it("ofrece la versión más nueva publicada", async () => {
     const { token } = await firstAdmin();
     const branch = await activatedBranch(token);
-    for (const version of ["1.10.0", "1.9.3", "1.2.0"]) await publishTo(token, (await uploadRelease(token, version)).id, "all");
+    for (const version of ["1.2.0", "1.9.3", "1.10.0"]) await publishTo(token, (await uploadRelease(token, version)).id, "all");
     const offered = await json(await check(branch), 200);
     expect((await verifyJws(offered.update, "culinary-update+jws")).version).toBe("1.10.0");
+  });
+
+  it("no deja publicar una versión menor o igual a la última lista de la plataforma", async () => {
+    const { token } = await firstAdmin();
+    await uploadRelease(token, "1.10.0");
+    for (const version of ["1.9.3", "1.10.0"]) {
+      const body = { version, platform: "linux-x64", filename: `culinary-${version}-b.deb`, notes: "" };
+      const res = await call("POST", "/admin/v1/releases", { token, body });
+      expect(res.status).toBe(409);
+      if (version === "1.9.3") expect((await res.json() as any).error.message).toContain("no es mayor que la última de linux-x64 (1.10.0)");
+    }
+    expect((await call("POST", "/admin/v1/releases", { token, body: { version: "1.10.1", platform: "linux-x64", filename: "culinary-1.10.1.deb", notes: "" } })).status).toBe(201);
+    expect((await call("POST", "/admin/v1/releases", { token, body: { version: "1.0.0", platform: "win-x64", filename: "culinary-1.0.0.exe", notes: "" } })).status).toBe(201);
+  });
+
+  it("sin versión más nueva dice cuál está publicada, para distinguir «al día» de «más nueva que la publicada»", async () => {
+    const { token } = await firstAdmin();
+    const branch = await activatedBranch(token);
+    expect(await json(await check(branch), 200)).toEqual({ update: null, latestVersion: null });
+    await publishTo(token, (await uploadRelease(token, "1.4.0")).id, "all");
+    expect(await json(await check(branch, "1.4.0"), 200)).toEqual({ update: null, latestVersion: "1.4.0" });
+    expect(await json(await check(branch, "1.5.0"), 200)).toEqual({ update: null, latestVersion: "1.4.0" });
   });
 
   it("descarga con el permiso de la licencia, también por rangos", async () => {

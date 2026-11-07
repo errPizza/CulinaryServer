@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { z } from "zod";
 import { requireAdmin } from "./admin-auth";
-import { addonsSchema, featuresSchema, limitsSchema, PLANS, termEnd, TIERS, type Plan } from "./catalog";
+import { addonsSchema, featuresSchema, integrationsSchema, limitsSchema, PLANS, termEnd, TIERS, type Plan } from "./catalog";
 import { ed25519Spki, issueHumanCode, toBase64Url } from "./crypto";
 import { keyFloor, licenseSigner, rootPublic } from "./keys";
 import { audit, auditStatement } from "./db";
@@ -28,6 +28,7 @@ const createSchema = z.strictObject({
   plan: z.enum(PLANS),
   tier: z.enum(TIERS),
   addons: addonsSchema.default([]),
+  integrations: integrationsSchema.default([]),
   trialDays: trialDays.optional(),
   features: featuresSchema,
   limits: limitsSchema,
@@ -44,6 +45,7 @@ const editSchema = z.strictObject({
   plan: z.enum(PLANS).optional(),
   tier: z.enum(TIERS).optional(),
   addons: addonsSchema.optional(),
+  integrations: integrationsSchema.optional(),
   trialDays: trialDays.optional(),
   features: featuresSchema.optional(),
   limits: limitsSchema.optional(),
@@ -109,7 +111,7 @@ admin.post("/licenses", async (c) => {
   const activation = await issueHumanCode();
   const at = new Date().toISOString();
   const { fiscal } = input;
-  const insert = c.env.DB.prepare(`INSERT INTO license (id, tenant_id, site_id, customer, branch_name, plan, tier, addons, trial_days, features, limits, revision, created_at, activation_code_hash, fiscal_rfc, fiscal_name, fiscal_postal_code, fiscal_regime) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?) RETURNING *`).bind(id, input.tenantId ?? crypto.randomUUID(), input.siteId, input.customer, input.branchName, input.plan, input.tier, JSON.stringify(input.addons), input.trialDays ?? null, JSON.stringify(input.features), JSON.stringify(input.limits), at, activation.hash, fiscal.rfc, fiscal.name, fiscal.postalCode, fiscal.regime);
+  const insert = c.env.DB.prepare(`INSERT INTO license (id, tenant_id, site_id, customer, branch_name, plan, tier, addons, integrations, trial_days, features, limits, revision, created_at, activation_code_hash, fiscal_rfc, fiscal_name, fiscal_postal_code, fiscal_regime) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?) RETURNING *`).bind(id, input.tenantId ?? crypto.randomUUID(), input.siteId, input.customer, input.branchName, input.plan, input.tier, JSON.stringify(input.addons), JSON.stringify(input.integrations), input.trialDays ?? null, JSON.stringify(input.features), JSON.stringify(input.limits), at, activation.hash, fiscal.rfc, fiscal.name, fiscal.postalCode, fiscal.regime);
   // The charge only needs what the license is sold as, so the license, its charge and the audit entry commit together.
   const draft = { id, plan: input.plan, tier: input.tier, addons: JSON.stringify(input.addons) } as LicenseRow;
   const charge = await chargeStatement(c.env.DB, draft, "sale", c.var.admin.id, { amount: input.charge });
@@ -144,7 +146,7 @@ admin.patch("/licenses/:id", async (c) => {
 
   const expiresAt = nextExpiry(row, plan, days, input);
 
-  const update = c.env.DB.prepare("UPDATE license SET site_id = ?, customer = ?, branch_name = ?, plan = ?, tier = ?, addons = ?, trial_days = ?, features = ?, limits = ?, expires_at = ?, fiscal_rfc = ?, fiscal_name = ?, fiscal_postal_code = ?, fiscal_regime = ?, revision = revision + 1 WHERE id = ? RETURNING *").bind(
+  const update = c.env.DB.prepare("UPDATE license SET site_id = ?, customer = ?, branch_name = ?, plan = ?, tier = ?, addons = ?, integrations = ?, trial_days = ?, features = ?, limits = ?, expires_at = ?, fiscal_rfc = ?, fiscal_name = ?, fiscal_postal_code = ?, fiscal_regime = ?, revision = revision + 1 WHERE id = ? RETURNING *").bind(
 
     input.siteId ?? row.site_id,
     input.customer ?? row.customer,
@@ -152,6 +154,7 @@ admin.patch("/licenses/:id", async (c) => {
     plan,
     input.tier ?? row.tier,
     input.addons ? JSON.stringify(input.addons) : row.addons,
+    input.integrations ? JSON.stringify(input.integrations) : row.integrations,
     days,
     input.features ? JSON.stringify(input.features) : row.features,
     input.limits ? JSON.stringify(input.limits) : row.limits,

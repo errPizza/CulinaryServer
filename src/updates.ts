@@ -72,6 +72,12 @@ export async function createRelease(env: Env, input: z.infer<typeof releaseSchem
   const exists = await env.DB.prepare("SELECT id FROM release WHERE platform = ? AND version = ?").bind(input.platform, input.version).first();
 
   if (exists) throw new ApiError(409, "conflict", DUPLICATE_VERSION);
+
+  // Branches never go back a version, so publishing one that is not newer than the last ready one only confuses them.
+  const { results: ready } = await env.DB.prepare("SELECT version FROM release WHERE platform = ? AND status = 'ready'").bind(input.platform).all<{ version: string }>();
+  const highest = ready.reduce<string | null>((best, r) => (!best || newer(r.version, best) ? r.version : best), null);
+
+  if (highest && !newer(input.version, highest)) throw new ApiError(409, "conflict", `La versión ${input.version} no es mayor que la última de ${input.platform} (${highest})`);
   
   const row: ReleaseRow = { id: crypto.randomUUID(), ...input, status: "uploading", upload_id: null, bytes: null, sha512: null, manifest: null, created_at: new Date().toISOString() };
   const upload = await env.PACKAGES.createMultipartUpload(objectKey(row));
@@ -271,7 +277,8 @@ export async function checkForUpdate(env: Env, license: LicenseRow, platform: st
   const { results } = await env.DB.prepare(`SELECT DISTINCT r.* ${PUBLISHED_TO} AND r.platform = ?2`).bind(license.id, platform).all<ReleaseRow>();
   const latest = results.reduce<ReleaseRow | undefined>((best, r) => (newer(r.version, best?.version ?? currentVersion) ? r : best), undefined);
  
-  if (!latest) return { update: null };
+  // Nothing newer: say which version is published, so the branch can tell "up to date" from "newer than published".
+  if (!latest) return { update: null, latestVersion: results.reduce<string | null>((best, r) => (!best || newer(r.version, best) ? r.version : best), null) };
 
   const token = randomToken();
   const expires = Date.now() + DOWNLOAD_TTL_MS;

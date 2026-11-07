@@ -164,6 +164,22 @@ describe("edición desde el panel", () => {
     expect(next.limits).toEqual({ maxUsers: 40, maxTables: 80, maxTerminals: 2 });
   });
 
+  it("las integraciones van en la licencia firmada; una licencia anterior a la lista las conserva todas", async () => {
+    const { token } = await firstAdmin();
+    const { license, activationCode } = await createLicense(token, { integrations: ["terminal", "pac", "pac"] });
+    expect(license.integrations).toEqual(["pac", "terminal"]);
+    const device = await newDevice();
+    await json(await activate(license, activationCode, device), 200);
+    expect((await verifyJws((await json(await renew(device, license.id), 200)).license, "culinary-license+jws")).integrations).toEqual(["pac", "terminal"]);
+    await json(await call("PATCH", `/admin/v1/licenses/${license.id}`, { token, body: { integrations: [] } }), 200);
+    expect((await verifyJws((await json(await renew(device, license.id), 200)).license, "culinary-license+jws")).integrations).toEqual([]);
+    expect((await call("PATCH", `/admin/v1/licenses/${license.id}`, { token, body: { integrations: ["deliveryHub"] } })).status).toBe(400);
+    await env.DB.prepare("UPDATE license SET integrations = NULL WHERE id = ?").bind(license.id).run();
+    const legacy = await verifyJws((await json(await renew(device, license.id), 200)).license, "culinary-license+jws");
+    expect(legacy).not.toHaveProperty("integrations");
+    expect((await json(await call("GET", `/admin/v1/licenses/${license.id}`, { token }), 200)).license.integrations).toBeNull();
+  });
+
   it("pasar de Lite a Pro con add-ons llega firmado y sube las terminales del nivel", async () => {
     const { token } = await firstAdmin();
     const { license, activationCode } = await createLicense(token, { addons: ["mobileOrdering"] });

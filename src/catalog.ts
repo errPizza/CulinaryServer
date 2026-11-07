@@ -12,6 +12,10 @@ export const ADDONS = ["mobileOrdering", "deliveryHub", "webOrdering"] as const;
 // Sold together at their own monthly price. Keep in step with COMBOS in CulinaryAdmin src/api.ts.
 export const COMBOS = [{ id: "pyme", tier: "lite", addons: ["mobileOrdering"] }, { id: "delivery", tier: "pro", addons: ["deliveryHub", "webOrdering"] }] as const;
 export const addonsSchema = z.array(z.enum(ADDONS)).max(ADDONS.length).transform((list) => [...new Set(list)].sort());
+// Third-party connections the branch may switch on. Delivery platforms stay under the deliveryHub add-on. A license
+// without the list (created before it existed) keeps every one, so nobody loses what they already use.
+export const INTEGRATIONS = ["pac", "terminal", "onlinepay", "messaging", "pms", "maps", "callerid", "printer"] as const;
+export const integrationsSchema = z.array(z.enum(INTEGRATIONS)).max(INTEGRATIONS.length).transform((list) => [...new Set(list)].sort());
 export const PLATFORMS = ["linux-x64", "win-x64", "android-arm64"] as const;
 export const DAY_MS = 24 * 60 * 60 * 1000;
 export const OFFLINE_GRACE_MS = 7 * DAY_MS;
